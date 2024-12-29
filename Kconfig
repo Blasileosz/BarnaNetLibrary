@@ -1,0 +1,14 @@
+menu "BarnaNetLibrary Menu"
+
+	menu "TCP server"
+		config B_TCP_PORT
+			int "Server PORT"
+			default 2005
+			range 1 65535
+			help
+				The port number the TCP server binds to on all available interfaces
+ 
+	endmenu
+
+endmenu
+ 
