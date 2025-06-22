@@ -7,7 +7,7 @@
 typedef struct {
 	uint8_t header; // Command OP and DEST
 	uint8_t ID; // Command ID
-	uint8_t stripID; // TODO: add feature
+	uint8_t stripID; // TODO: add feature or build it into the led command's data
 
 	uint8_t data[125];
 } B_command_t;
@@ -28,6 +28,10 @@ static_assert(_Alignof(B_command_t) == 1);
 #define B_COMMAND_OP_ERR (uint8_t) 0b11000000
 
 #define B_COMMAND_DEST_MASK (uint8_t)0b00111111
+enum B_COMMAND_DEST_ENUM {
+	B_COMMAND_DEST_TCP = 1, // TODO: reconfigure to allow this (it would be cleaner even if there is only one way to be sent there)
+	B_COMMAND_DEST_ALARM = 2
+};
 
 #define B_COMMAND_OP(header) (header & B_COMMAND_OP_MASK)
 #define B_COMMAND_DEST(header) (header & B_COMMAND_DEST_MASK)

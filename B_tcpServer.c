@@ -1,6 +1,6 @@
 #include "B_tcpServer.h"
 
-static const char *tcpTag = "BarnaNet - TCP";
+static const char* tcpTag = "BarnaNet - TCP";
 
 // Inits the TCP server
 // - Private function

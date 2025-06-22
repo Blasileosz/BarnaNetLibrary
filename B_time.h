@@ -42,19 +42,42 @@
 #define B_SNTP_MAX_RETRY 15
 #define B_SNTP_TIMEOUT_MS 2000
 
+// Timepart
+// Holds the hours, minutes and seconds
+typedef uint32_t B_timepart_t;
+
+B_timepart_t B_GetTimepart(time_t timestamp); // Get timepart from time_t
+B_timepart_t B_GetLocalTimepart(time_t timestamp); // Get timepart in local time from time_t
+B_timepart_t B_BuildTimepart(int hours, int minutes, int seconds); // Assemble timepart from h,m,s (argument bounds are not checked)
+
+int B_TimepartGetSeconds(B_timepart_t timepart);
+int B_TimepartGetMinutes(B_timepart_t timepart);
+int B_TimepartGetHours(B_timepart_t timepart);
+
+// NTP
 bool B_SyncTime();
 void B_DeinitSntp();
 
+// Debug
 void B_PrintLocalTime();
 
 // MISC
 bool B_IsLeapYear(int year);
 time_t B_JulianToTimestamp(double julian);
 double B_TimestampToJulian(time_t timestamp);
+B_timepart_t B_JulianToTimepart(double julian);
+
 double B_Radians(double degrees);
 double B_Degrees(double radians);
 
 // Get sunset and sunrise for given timestamp (the output are in UTC)
 // Reference: https://gml.noaa.gov/grad/solcalc/table.php?lat=47.896095&lon=20.380313&year=2024
 // https://en.wikipedia.org/wiki/Sunrise_equation#Complete_calculation_on_Earth
-void B_CalculateSunSetRise(time_t timestamp, time_t* sunriseOut, time_t* sunsetOut);
+void B_CalculateSunSetRise(time_t timestamp, B_timepart_t* sunriseOut, B_timepart_t* sunsetOut);
+
+// Precalculated values for 47.896095, 20.380313, using the /utils/bakeSun.py
+// Source: https://gml.noaa.gov/grad/solcalc/table.php?lat=47.896095&lon=20.380313&year=2024
+// The ESP-IDF puts the const declared array into .rodata, no need to manualy specify
+// Interpreted as UTC timepart
+extern const B_timepart_t B_SUNRISE_TABLE[12][31];
+extern const B_timepart_t B_SUNSET_TABLE[12][31];

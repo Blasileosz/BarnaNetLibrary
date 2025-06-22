@@ -1,12 +1,13 @@
 # BarnaNetLibrary
 
 ## TODO
-- [ ] Alarms: https://docs.espressif.com/projects/esp-idf/en/v4.3/esp32/api-reference/peripherals/timer.html#functional-overview
+- [ ] Alarms
+	- [ ] Define an alarm struct and of those an array that can be filled through tcp
 - [ ] NVS: https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/storage/nvs_flash.html#application-example
 - [ ] Test sunrise
 - [ ] Azure IoT https://github.com/espressif/esp-azure/tree/master is deprecated, see my Github stars
+- [ ] Manual connect to WIFI using the device as an AP and a web interface
 - [ ] Format everything
-	- [ ] Change formating of structs to not use typedef and remove _t for clarity
 
 ## BarnaNet Protocol
 For definition, see [B_BarnaNetCommand.h](/B_BarnaNetCommand.h)
@@ -35,3 +36,9 @@ For definition, see [B_time.h](/B_time.h)
 - [ ] Add types for storing only time (hh:mm) and date (yyyy. mm. dd. hh:mm)
 - Includes an NTP client
 - Includes Sunrise and Sunset calculation function
+
+## Alarm
+For definition, see [B_alarm.h](/B_alarm.h)
+- [EPS-IDF timer and alarm documentation](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/peripherals/gptimer.html)
+- Creates a timer that is ticking up at 1MHz
+- Attaches an alarm that triggers an ISR when the timer's target value is reached

@@ -7,7 +7,15 @@ menu "BarnaNetLibrary Menu"
 			range 1 65535
 			help
 				The port number the TCP server binds to on all available interfaces
- 
+	endmenu
+
+	menu "Alarm"
+		config B_ALARM_CONTAINER_CAPACITY
+			int "Alarm container capacity"
+			default 10
+			range 5 20
+			help
+				The maximum storable alarm count
 	endmenu
 
 endmenu
