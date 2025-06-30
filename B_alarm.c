@@ -7,123 +7,53 @@ static int selectedAlarmIndex = -1;
 static gptimer_handle_t alarmTimer;
 
 // ISR function must comply with the gptimer_alarm_cb_t definition
-static bool IRAM_ATTR B_AlarmCallback(gptimer_handle_t timer, const gptimer_alarm_event_data_t* eventData, void* userData)
+static bool IRAM_ATTR B_AlarmInterrupt(gptimer_handle_t timer, const gptimer_alarm_event_data_t* eventData, void* userData)
 {
 	BaseType_t highPriorityTaskWoken = pdFALSE;
 	QueueHandle_t queue = (QueueHandle_t)userData;
 
-	B_command_t sendCommand = { 0 };
-
-	sendCommand.header = B_COMMAND_OP_RES | B_COMMAND_DEST_ALARM;
-	sendCommand.ID = B_ALARM_COMMAND_TRIGGER;
-
-	xQueueSendFromISR(queue, &sendCommand, &highPriorityTaskWoken);
+	B_command_t sendCommand = { 
+		.from = B_TASKID_ALARM,
+		.dest = B_TASKID_ALARM,
+		.header = B_COMMAND_OP_RES | B_ALARM_COMMAND_TRIGGER
+	};
 
 	// Cannot ESP_ERROR_CHECK in ISR
+	xQueueSendFromISR(queue, &sendCommand, &highPriorityTaskWoken);
 
 	return highPriorityTaskWoken == pdTRUE;
 }
 
-static bool B_InitTimer(QueueHandle_t* alarmCommandQueue)
+static bool B_InsertAlarm(struct B_AlarmContainer* const container, B_timepart_t localTimepart, uint8_t days, const B_command_t* const triggerCommand, size_t commandSize)
 {
-	// Create timer
-	gptimer_config_t timerConfig = {
-		.clk_src = GPTIMER_CLK_SRC_DEFAULT,
-		.direction = GPTIMER_COUNT_UP,
-		.resolution_hz = B_ALARM_TIMER_RESOLUTION_HZ
-	};
-	ESP_ERROR_CHECK(gptimer_new_timer(&timerConfig, &alarmTimer));
-
-	// SOC_TIMER_GROUP_COUNTER_BIT_WIDTH shows the width of the counter
-
-	// Create alarm
-	gptimer_alarm_config_t alarmConfig = {
-		.alarm_count = 5 * B_ALARM_TIMER_RESOLUTION_HZ, // 5s
-		.flags.auto_reload_on_alarm = false
-	};
-	ESP_ERROR_CHECK(gptimer_set_alarm_action(alarmTimer, &alarmConfig));
-
-	// Register callback
-	gptimer_event_callbacks_t callbackConfig = {
-		.on_alarm = B_AlarmCallback
-	};
-	// Pass queue handle by value
-	ESP_ERROR_CHECK(gptimer_register_event_callbacks(alarmTimer, &callbackConfig, *alarmCommandQueue));
-
-	// Enable timer
-	ESP_ERROR_CHECK(gptimer_enable(alarmTimer));
-
-	// Set 5s value to the timer
-	ESP_ERROR_CHECK(gptimer_set_raw_count(alarmTimer, 5 * B_ALARM_TIMER_RESOLUTION_HZ));
-
-	// Start timer
-	ESP_ERROR_CHECK(gptimer_start(alarmTimer));
-
-
-	// Allocate alarm container
-	alarmContainer.buffer = calloc(CONFIG_B_ALARM_CONTAINER_CAPACITY, sizeof(B_AlarmInfo_t));
-	if (alarmContainer.buffer == NULL)
-		return false;
-
-	return true;
-}
-
-static void B_RestartTimer(int seconds)
-{
-	// Reset timer value (no need to stop for the duration of setting the new alarm count)
-	uint64_t timerValue = 0;
-	ESP_ERROR_CHECK(gptimer_get_raw_count(alarmTimer, &timerValue));
-	ESP_LOGI(alarmTag, "Counter value: %lld ticks", timerValue);
-	// Error with 3s alarm: 3 000 480
-
-	ESP_ERROR_CHECK(gptimer_set_raw_count(alarmTimer, 0));
-
-	// Must create new alarm if alarm_count changes
-	gptimer_alarm_config_t alarmConfig = {
-		.alarm_count = (uint64_t)seconds * B_ALARM_TIMER_RESOLUTION_HZ,
-		.flags.auto_reload_on_alarm = false
-	};
-	ESP_ERROR_CHECK(gptimer_set_alarm_action(alarmTimer, &alarmConfig));
-	
-
-	ESP_LOGI(alarmTag, "Restarted timer (%is)", seconds);
-}
-
-static void B_CleanupTimer()
-{
-	ESP_ERROR_CHECK(gptimer_stop(alarmTimer));
-	ESP_ERROR_CHECK(gptimer_disable(alarmTimer));
-	ESP_ERROR_CHECK(gptimer_del_timer(alarmTimer));
-
-	free(alarmContainer.buffer);
-}
-
-bool B_InsertAlarm(struct B_AlarmContainer* const container, const B_AlarmInfo_t* const newAlarm)
-{
-	if (container->buffer == NULL || container->size == CONFIG_B_ALARM_CONTAINER_CAPACITY) {
+	if (container->buffer == NULL || container->size >= CONFIG_B_ALARM_CONTAINER_CAPACITY) {
 		ESP_LOGI(alarmTag, "Failed to insert alarm into container");
 		return false;
 	}
 
-	container->buffer[container->size].localTimepart = newAlarm->localTimepart;
-	container->buffer[container->size].days = newAlarm->days;
-	memcpy(&container->buffer[container->size].triggerCommand, &newAlarm->triggerCommand, sizeof(B_command_t));
+	container->buffer[container->size].localTimepart = localTimepart;
+	container->buffer[container->size].days = days;
+	memset(&container->buffer[container->size].triggerCommand, 0, sizeof(B_command_t)); // Clear buffer just in case
+	memcpy(&container->buffer[container->size].triggerCommand, triggerCommand, commandSize);
 	container->size++;
 	return true;
 }
 
-bool B_RemoveAlarm(struct B_AlarmContainer* const container, int index)
+static bool B_RemoveAlarm(struct B_AlarmContainer* const container, uint8_t index)
 {
-	if (container->buffer == NULL || container->size <= index) {
+	if (container->buffer == NULL || index >= container->size) {
 		ESP_LOGI(alarmTag, "Failed to remove alarm from container");
 		return false;
 	}
+	
+	container->size--;
+	if (container->size == 0)
+		return true;
 
 	// Copy from back of the buffer to the index
 	container->buffer[index].localTimepart = container->buffer[container->size].localTimepart;
 	container->buffer[index].days = container->buffer[container->size].days;
 	memcpy(&container->buffer[index].triggerCommand, &container->buffer[container->size].triggerCommand, sizeof(B_command_t));
-	container->size--;
 	return true;
 }
 
@@ -132,16 +62,18 @@ static void B_PrintNextTriggerDelta(int returnValue)
 	ESP_LOGI(alarmTag, "%i days, %02i:%02i:%02i", (returnValue / (24 * 3600)), B_TimepartGetHours(returnValue), B_TimepartGetMinutes(returnValue), B_TimepartGetSeconds(returnValue));
 }
 
-static int B_AlarmFindNextTrigger(const B_AlarmInfo_t* const alarm, const struct tm* const localTime)
+static B_timepart_t B_AlarmFindNextTrigger(const B_AlarmInfo_t* const alarm, const struct tm* const localTime)
 {
 	int wday = localTime->tm_wday;
 	int timePartNow = B_BuildTimepart(localTime->tm_hour, localTime->tm_min, localTime->tm_sec);
 	B_timepart_t alarmTrigTime = alarm->localTimepart;
 
+	// Day of month: tm_mday values: [1, 31]
+	// Month of year: tm_mon values: [0, 11]
 	if (alarmTrigTime == B_ALARM_TRIGGER_SUNRISE)
-		alarmTrigTime = B_GetLocalTimepart(B_SUNRISE_TABLE[localTime->tm_mon][localTime->tm_mday]);
+		alarmTrigTime = B_GetLocalTimepart(B_SUNRISE_TABLE[localTime->tm_mon][localTime->tm_mday - 1]);
 	else if (alarmTrigTime == B_ALARM_TRIGGER_SUNSET)
-		alarmTrigTime = B_GetLocalTimepart(B_SUNSET_TABLE[localTime->tm_mon][localTime->tm_mday]);
+		alarmTrigTime = B_GetLocalTimepart(B_SUNSET_TABLE[localTime->tm_mon][localTime->tm_mday - 1]);
 
 	// If it has triggered today, skip to tomorrow
 	bool isOffsetDay = alarmTrigTime <= timePartNow && alarm->days & (1 << wday);
@@ -159,16 +91,16 @@ static int B_AlarmFindNextTrigger(const B_AlarmInfo_t* const alarm, const struct
 	return 0xFFFFFFFF;
 }
 
-static int B_AlarmFindNextTrigger2(const B_AlarmInfo_t* const alarm, const struct tm* const localTime)
+static B_timepart_t B_AlarmFindNextTrigger2(const B_AlarmInfo_t* const alarm, const struct tm* const localTime)
 {
 	int wday = localTime->tm_wday;
 	int timePartNow = B_BuildTimepart(localTime->tm_hour, localTime->tm_min, localTime->tm_sec);
 	B_timepart_t alarmTrigTime = alarm->localTimepart;
 
 	if (alarmTrigTime == B_ALARM_TRIGGER_SUNRISE)
-		alarmTrigTime = B_GetLocalTimepart(B_SUNRISE_TABLE[localTime->tm_mon][localTime->tm_mday]);
+		alarmTrigTime = B_GetLocalTimepart(B_SUNRISE_TABLE[localTime->tm_mon][localTime->tm_mday - 1]);
 	else if (alarmTrigTime == B_ALARM_TRIGGER_SUNSET)
-		alarmTrigTime = B_GetLocalTimepart(B_SUNRISE_TABLE[localTime->tm_mon][localTime->tm_mday]);
+		alarmTrigTime = B_GetLocalTimepart(B_SUNRISE_TABLE[localTime->tm_mon][localTime->tm_mday - 1]);
 
 	// If it has triggered today, skip to tomorrow
 	bool isOffsetDay = alarmTrigTime <= timePartNow && alarm->days & (1 << wday);
@@ -190,14 +122,14 @@ static int B_AlarmFindNextTrigger2(const B_AlarmInfo_t* const alarm, const struc
 	return alarmTrigTime - timePartNow + (trailingZeros * 24 * 3600);
 }
 
-static int B_FindNextAlarm(int* outAlarmIndex)
+static B_timepart_t B_FindNextAlarm(int* outAlarmIndex)
 {
 	time_t now = 0; // UTC time
 	time(&now);
 	struct tm timeStruct = { 0 }; // Local time
 	localtime_r(&now, &timeStruct);
 
-	int minTrigTime = 0x7FFFFFFF;
+	B_timepart_t minTrigTime = 0xFFFFFFFF;
 	int closestAlarmIndex = -1;
 	for (int i = 0; i < alarmContainer.size; i++)
 	{
@@ -209,110 +141,281 @@ static int B_FindNextAlarm(int* outAlarmIndex)
 		}
 	}
 
-	if (outAlarmIndex != NULL)
-		*outAlarmIndex = closestAlarmIndex;
-
+	// If the alarm container is empty, returns the default values (-1 and 0xFFFFFFFF)
+	*outAlarmIndex = closestAlarmIndex;
 	return minTrigTime;
+}
+
+static bool B_TimerInit(QueueHandle_t alarmCommandQueue)
+{
+	// Create timer
+	// The internal counter value defaults to zero
+	gptimer_config_t timerConfig = {
+		.clk_src = GPTIMER_CLK_SRC_DEFAULT,
+		.direction = GPTIMER_COUNT_UP,
+		.resolution_hz = B_ALARM_TIMER_RESOLUTION_HZ
+	};
+	ESP_ERROR_CHECK(gptimer_new_timer(&timerConfig, &alarmTimer));
+
+	// SOC_TIMER_GROUP_COUNTER_BIT_WIDTH shows the width of the counter
+
+	// Get the next alarm for the timer to be started with
+	// If the alarm container is empty, set the timer's counter to 0, from this RestartTimer will know that it has to start it
+	B_timepart_t trigTime = B_FindNextAlarm(&selectedAlarmIndex);
+	if (selectedAlarmIndex == -1){
+		trigTime = 0;
+		ESP_LOGI(alarmTag, "Empty alarm container at startup, timer wasn't started");
+	}
+
+	// Create alarm
+	gptimer_alarm_config_t alarmConfig = {
+		.alarm_count = (uint64_t)trigTime * B_ALARM_TIMER_RESOLUTION_HZ,
+		.flags.auto_reload_on_alarm = false
+	};
+	ESP_ERROR_CHECK(gptimer_set_alarm_action(alarmTimer, &alarmConfig));
+
+	// Register callback
+	gptimer_event_callbacks_t callbackConfig = {
+		.on_alarm = B_AlarmInterrupt
+	};
+	// Pass queue handle by value
+	ESP_ERROR_CHECK(gptimer_register_event_callbacks(alarmTimer, &callbackConfig, alarmCommandQueue));
+
+	// Enable timer
+	ESP_ERROR_CHECK(gptimer_enable(alarmTimer));
+
+	// Start timer if an alarm was selected, otherwise RestartTimer will start it later
+	if (selectedAlarmIndex != -1)
+		ESP_ERROR_CHECK(gptimer_start(alarmTimer));
+
+
+	// Allocate alarm container (memory is zero initialized at insert time)
+	alarmContainer.buffer = malloc(CONFIG_B_ALARM_CONTAINER_CAPACITY * sizeof(B_AlarmInfo_t));
+	if (alarmContainer.buffer == NULL)
+		return false;
+
+	ESP_LOGI(alarmTag, "Timer configured");
+	return true;
+}
+
+static void B_RestartTimer(B_timepart_t seconds)
+{
+	uint64_t timerValue = 0;
+	ESP_ERROR_CHECK(gptimer_get_raw_count(alarmTimer, &timerValue));
+	ESP_LOGI(alarmTag, "Counter value: %lld ticks", timerValue);
+	// Inaccuracy with 3s alarm: 3 000 480
+
+	// Must create new alarm if alarm_count changes
+	gptimer_alarm_config_t alarmConfig = {
+		.alarm_count = (uint64_t)seconds * B_ALARM_TIMER_RESOLUTION_HZ,
+		.flags.auto_reload_on_alarm = false
+	};
+	ESP_ERROR_CHECK(gptimer_set_alarm_action(alarmTimer, &alarmConfig));
+
+	// Start the timer if it hasn't been, otherwise just reset it
+	if (timerValue == 0)
+		ESP_ERROR_CHECK(gptimer_start(alarmTimer));
+	else
+		ESP_ERROR_CHECK(gptimer_set_raw_count(alarmTimer, 0));
+	
+	ESP_LOGI(alarmTag, "Restarted timer (%is)", seconds);
+}
+
+static void B_TimerCleanup()
+{
+	ESP_ERROR_CHECK(gptimer_stop(alarmTimer));
+	ESP_ERROR_CHECK(gptimer_disable(alarmTimer));
+	ESP_ERROR_CHECK(gptimer_del_timer(alarmTimer));
+
+	free(alarmContainer.buffer);
 }
 
 void B_AlarmTask(void* pvParameters)
 {
-	const struct B_AlarmTaskParameter* const alarmTaskParameter = (const struct B_AlarmTaskParameter* const)pvParameters;
-	if (alarmTaskParameter == NULL || alarmTaskParameter->alarmCommandQueue == NULL || alarmTaskParameter->handlerFunctionPointer == NULL || alarmTaskParameter->tcpCommandQueue == NULL) {
+	const struct B_AlarmTaskParameter* const taskParameter = (const struct B_AlarmTaskParameter* const)pvParameters;
+	if (taskParameter == NULL || taskParameter->addressMap == NULL) {
 		ESP_LOGE(alarmTag, "The alarm task parameter is invalid, aborting startup");
 		vTaskDelete(NULL);
 	}
 
-	if (!B_InitTimer(alarmTaskParameter->alarmCommandQueue)) {
+	QueueHandle_t alarmQueue = B_GetAddress(taskParameter->addressMap, B_TASKID_ALARM);
+	if (!B_TimerInit(alarmQueue)) {
 		ESP_LOGE(alarmTag, "Failed to create the alarm, aborting startup");
 		vTaskDelete(NULL);
 	}
 
 	// Test ---
-	B_AlarmInfo_t testAlarm = {.days = B_EVERYDAY, .localTimepart = B_BuildTimepart(12, 10, 00)};
-	B_InsertAlarm(&alarmContainer, &testAlarm);
+	B_command_t testCommand = {.from = B_TASKID_ALARM, .dest = 3, .header = B_COMMAND_OP_SET | 1};
+	testCommand.body[0] = 255;
+	testCommand.body[1] = 255;
+	testCommand.body[2] = 255;
+	testCommand.body[3] = 0;
+	testCommand.body[4] = 0;
 
-	testAlarm.localTimepart = B_BuildTimepart(12, 12, 0);
-	B_InsertAlarm(&alarmContainer, &testAlarm);
+	// B_InsertAlarm(&alarmContainer, B_BuildTimepart(16, 55, 00), B_EVERYDAY, &testCommand, 8);
 
-	testAlarm.localTimepart = B_ALARM_TRIGGER_SUNSET;
-	B_InsertAlarm(&alarmContainer, &testAlarm);
+	// B_InsertAlarm(&alarmContainer, B_BuildTimepart(17, 00, 0), B_EVERYDAY, &testCommand, 8);
+
+	B_InsertAlarm(&alarmContainer, B_ALARM_TRIGGER_SUNSET, B_EVERYDAY, &testCommand, 8);
 	// ---
-
-
-	ESP_LOGI(alarmTag, "Alarm timer created, configured and started");
 
 	while (true) {
 		// Block until a command is received
-		B_command_t receiveCommand = { 0 };
-		xQueueReceive(*alarmTaskParameter->alarmCommandQueue, &receiveCommand, portMAX_DELAY);
+		B_command_t command = { 0 };
+		xQueueReceive(alarmQueue, (void* const)&command, portMAX_DELAY);
 
-		ESP_LOGI(alarmTag, "Alarm event triggered");
+		uint8_t commandOP = B_COMMAND_OP(command.header);
+		uint8_t commandID = B_COMMAND_ID(command.header);
 
-		// switch (receiveCommand.ID)
-		// {
-		// case B_ALARM_COMMAND_TRIGGER:
-		// 	{
-				
-		// 		break;
-		// 	}
-		// }
-
-		// Message from ISR, dispatch to handler function
-		if (receiveCommand.header == B_COMMAND_OP_RES | B_COMMAND_DEST_ALARM && receiveCommand.ID == B_ALARM_COMMAND_TRIGGER) {
+		// Message from ISR, dispatch the triggered alarm's command to it's appropriate destination
+		if (commandOP == B_COMMAND_OP_RES && commandID == B_ALARM_COMMAND_TRIGGER) {
+			ESP_LOGI(alarmTag, "Triggered: #%i", selectedAlarmIndex);
 
 			if (selectedAlarmIndex == -1 || selectedAlarmIndex >= alarmContainer.size) {
-				ESP_LOGE(alarmTag, "Selected alarm index is invalid at time of trigger");
+				ESP_LOGW(alarmTag, "Selected alarm index is invalid at time of trigger");
 				continue;
 			}
 
-			// Copy the triggered alarm's command to the receive buffer and send it onwards
-			memcpy(&receiveCommand, &alarmContainer.buffer[selectedAlarmIndex].triggerCommand, sizeof(B_command_t));
-
-			// Only the state changes need outside handling
-			alarmTaskParameter->handlerFunctionPointer(&receiveCommand);
+			const B_command_t* triggerCommand = &alarmContainer.buffer[selectedAlarmIndex].triggerCommand;
+			QueueHandle_t destQueue = B_GetAddress(taskParameter->addressMap, triggerCommand->dest);
+			if (xQueueSend(destQueue, triggerCommand, 0) != pdPASS) {
+				ESP_LOGE(alarmTag, "Failed to dispatch trigger command");
+			}
 		}
 
 		// Insert command
-		if (receiveCommand.header == B_COMMAND_OP_SET | B_COMMAND_DEST_ALARM && receiveCommand.ID == B_ALARM_COMMAND_INSERT) {
+		else if (commandOP == B_COMMAND_OP_SET && commandID == B_ALARM_COMMAND_INSERT) {
 
-			// if (alarmContainer.size == CONFIG_B_ALARM_CONTAINER_CAPACITY) {
-			// 	ESP_LOGE(alarmTag, "Alarm container is at capacity")
-			// }
+			B_timepart_t localTimepart = B_ReadCommandBody_DWORD(&command, 0);
+			uint8_t days = B_ReadCommandBody_BYTE(&command, 4);
 
-			B_AlarmInfo_t receivedAlarm = {0};
-			receivedAlarm.localTimepart = *((B_timepart_t*)&receiveCommand.data[0]);
-			receivedAlarm.days = receiveCommand.data[4];
-			memcpy(&receivedAlarm.triggerCommand, &receiveCommand.data[5], sizeof(receiveCommand.data)); // Only 125 bytes are copied, see B_AlarmInfo_t definition for the problem
+			ESP_LOGI(alarmTag, "Insert command: %us %u", localTimepart, days);
 
-			if (!B_InsertAlarm(&alarmContainer, &receivedAlarm)){
-				ESP_LOGE(alarmTag, "Error while inserting");
+			// Insert command starts at body + 5
+			// Body section would overflow, so only access the header bytes
+			// Sanitize new alarm's trigger command (only SET, definitely no TCP or ALARM as destination)
+			const B_command_t* triggerCommand = (B_command_t*)(command.body + 5);
+			if (B_COMMAND_OP(triggerCommand->header) != B_COMMAND_OP_SET || triggerCommand->dest == B_TASKID_ALARM || triggerCommand->dest == B_TASKID_TCP) {
+				ESP_LOGW(alarmTag, "Invalid trigger command received in new alarm");
+				B_SendStatusReply(taskParameter->addressMap, B_TASKID_ALARM, command.from, B_COMMAND_OP_ERR, commandID, "Invalid trigger command");
+				continue;
 			}
 
-			// TODO: reply
+			if (!B_InsertAlarm(&alarmContainer, localTimepart, days, triggerCommand, B_COMMAND_BODY_SIZE - 5)) {
+				ESP_LOGW(alarmTag, "Error while inserting");
+				B_SendStatusReply(taskParameter->addressMap, B_TASKID_ALARM, command.from, B_COMMAND_OP_ERR, commandID, "Falied to insert the alarm");
+				continue;
+			}
+
+			// Reply to the sender
+			B_SendStatusReply(taskParameter->addressMap, B_TASKID_ALARM, command.from, B_COMMAND_OP_RES, commandID, "Inserted alarm");
 		}
 
 		// Remove command
-		if (receiveCommand.header == B_COMMAND_OP_SET | B_COMMAND_DEST_ALARM && receiveCommand.ID == B_ALARM_COMMAND_REMOVE) {
+		else if (commandOP == B_COMMAND_OP_SET && commandID == B_ALARM_COMMAND_REMOVE) {
 
-			int removeIndex = -1;
-			removeIndex = *((int*)&receiveCommand.data[0]); // Handle negative data
+			uint8_t removeIndex = B_ReadCommandBody_BYTE(&command, 0);
+
+			ESP_LOGI(alarmTag, "Remove command: #%u", removeIndex);
 
 			if (!B_RemoveAlarm(&alarmContainer, removeIndex)) {
-				ESP_LOGE(alarmTag, "Error while removing");
+				ESP_LOGW(alarmTag, "Error while removing");
+				B_SendStatusReply(taskParameter->addressMap, B_TASKID_ALARM, command.from, B_COMMAND_OP_ERR, commandID, "Falied to remove the alarm");
+				continue;
 			}
 
-			// TODO: reply
+			// Reply to the sender
+			B_SendStatusReply(taskParameter->addressMap, B_TASKID_ALARM, command.from, B_COMMAND_OP_RES, commandID, "Removed alarm");
 		}
 
+		// List command
+		else if (commandOP == B_COMMAND_OP_GET && commandID == B_ALARM_COMMAND_LIST) {
 
-		// TODO: handle case when alarmContainer is empty
-		int trigTime = B_FindNextAlarm(&selectedAlarmIndex);
-		B_RestartTimer(trigTime);
+			ESP_LOGI(alarmTag, "List command");
 
+			B_command_t responseCommand = {
+				.from = B_TASKID_ALARM,
+				.dest = command.from,
+				.header = B_COMMAND_OP_RES | B_ALARM_COMMAND_LIST
+			};
+
+			uint8_t maxFillableCount = alarmContainer.size;
+			// One alarm's data takes up 5 bytes, check if all of them fit into the body
+			if (alarmContainer.size * 5 > B_COMMAND_BODY_SIZE) {
+				ESP_LOGW(alarmTag, "List response cannot carry all the alarm's data");
+				maxFillableCount = B_COMMAND_BODY_SIZE / 5; // Integer division truncates
+			}
+
+			// Fill body
+			// No need to zero init the body, because the alarm container had
+			for (uint8_t i = 0; i < maxFillableCount; i++) {
+				B_AlarmInfo_t* iAlarmInfo = &alarmContainer.buffer[i];
+				B_FillCommandBody_DWORD(&responseCommand, i * 5, iAlarmInfo->localTimepart);
+				B_FillCommandBody_BYTE(&responseCommand, i * 5 + 4, iAlarmInfo->days);
+			}
+
+			// Send back response
+			QueueHandle_t responseQueue = B_GetAddress(taskParameter->addressMap, responseCommand.dest);
+			if (xQueueSend(responseQueue, &responseCommand, 0) != pdPASS) {
+				ESP_LOGE(alarmTag, "Failed to send data back to sender");
+			}
+
+			// No need to recalculate next alarm
+			continue;
+		}
+
+		// Inspect command
+		else if (commandOP == B_COMMAND_OP_GET && commandID == B_ALARM_COMMAND_INSPECT) {
+
+			ESP_LOGI(alarmTag, "Inspect command");
+
+			B_command_t responseCommand = {
+				.from = B_TASKID_ALARM,
+				.dest = command.from,
+				.header = B_COMMAND_OP_RES | B_ALARM_COMMAND_INSPECT
+			};
+
+			uint8_t index = B_ReadCommandBody_BYTE(&command, 0);
+
+			if (alarmContainer.buffer == NULL || index >= alarmContainer.size) {
+				ESP_LOGW(alarmTag, "Invalid index");
+				B_SendStatusReply(taskParameter->addressMap, B_TASKID_ALARM, command.from, B_COMMAND_OP_ERR, commandID, "Invalid index");
+				continue;
+			}
+
+			// Copy trigger command into response
+			// No need to zero init the body, because the alarm container had
+			const B_command_t* triggerCommand = &alarmContainer.buffer[index].triggerCommand;
+			memcpy(&responseCommand.body, triggerCommand, B_COMMAND_BODY_SIZE);
+
+			// Send back response
+			QueueHandle_t responseQueue = B_GetAddress(taskParameter->addressMap, responseCommand.dest);
+			if (xQueueSend(responseQueue, &responseCommand, 0) != pdPASS) {
+				ESP_LOGE(alarmTag, "Failed to send data back to sender");
+			}
+
+			// No need to recalculate next alarm
+			continue;
+		}
+
+		// Not valid command
+		else {
+			B_SendStatusReply(taskParameter->addressMap, B_TASKID_ALARM, command.from, B_COMMAND_OP_ERR, commandID, "Invalid command");
+			continue;
+		}
+
+		// If there is a next alarm (the container isn't empty) restart the timer, otherwise stop the timer
+		B_timepart_t trigTime = B_FindNextAlarm(&selectedAlarmIndex);
+		if (selectedAlarmIndex != -1){
+			B_RestartTimer(trigTime);
+		}
+		else {
+			ESP_ERROR_CHECK(gptimer_stop(alarmTimer));
+			ESP_ERROR_CHECK(gptimer_set_raw_count(alarmTimer, 0));
+		}
 	}
 
 	// Task paniced, clean up and delete task
-	B_CleanupTimer();
+	B_TimerCleanup();
 	vTaskDelete(NULL);
 }

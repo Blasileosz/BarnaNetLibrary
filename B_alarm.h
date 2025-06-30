@@ -1,5 +1,7 @@
 #pragma once
 
+#define B_TASKID_ALARM 2
+
 #include <stdio.h>
 
 #include <freertos/FreeRTOS.h>
@@ -20,6 +22,7 @@
 #include <driver/gptimer.h>
 
 #include "B_BarnaNetCommand.h"
+#include "B_tcpServer.h"
 #include "B_time.h"
 
 // Cpu freq is configured in the menuconfig an is defined: CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ
@@ -53,7 +56,7 @@ static_assert(B_EVERYDAY == (B_MONDAY | B_TUESDAY | B_WEDNESDAY | B_THURSDAY | B
 
 // Max timepart is 86399
 #define B_ALARM_TRIGGER_SUNRISE 0xFFFFFFFF
-#define B_ALARM_TRIGGER_SUNSET 0xFFFFFFFF - 1
+#define B_ALARM_TRIGGER_SUNSET (0xFFFFFFFF - 1)
 
 // TODO: Will inevitably be truncated when put into a commands data field
 typedef struct {
@@ -62,83 +65,56 @@ typedef struct {
 	B_command_t triggerCommand;
 } B_AlarmInfo_t;
 
-struct B_AlarmContainer{
+struct B_AlarmContainer {
+	uint8_t size;
 	B_AlarmInfo_t* buffer;
-	int size;
 };
 
-// -- COMMANDS -- //
-// DEST: B_COMMAND_DEST_ALARM
 enum B_ALARM_COMMAND_IDS {
 	B_ALARM_COMMAND_TRIGGER, // Used only internally, to signal to task from ISR
 	B_ALARM_COMMAND_INSERT,
 	B_ALARM_COMMAND_REMOVE,
-	B_ALARM_COMMAND_LIST
+	B_ALARM_COMMAND_LIST,
+	B_ALARM_COMMAND_INSPECT
 };
 
-// EXAMPLES:
 
-// RESPOND TRIGGER - Expected data: none
-// - Example: [B_COMMAND_OP_RES | B_COMMAND_DEST_ALARM, B_ALARM_COMMAND_TRIGGER, unused]
-
-// SET INSERT - Expected data: B_AlarmInfo_t
-// - Example: [B_COMMAND_OP_SET | B_COMMAND_DEST_ALARM, B_ALARM_COMMAND_INSERT, unused, TIMEPART0, TIMEPART1, TIMEPART2, TIMEPART3, DAYS, DATA * 125]
-// RESPOND INSERT - Response
-// - bytes 0: insert status
-// - Example: [B_COMMAND_OP_RES | B_COMMAND_DEST_ALARM, B_ALARM_COMMAND_INSERT, unused, STATUS]
-
-// SET REMOVE - Expected data: index
-// - Example: [B_COMMAND_OP_SET | B_COMMAND_DEST_ALARM, B_ALARM_COMMAND_REMOVE, unused, INDEX0, INDEX1, INDEX2, INDEX3]
-// RESPOND REMOVE - Response
-// - bytes 0: remove status
-// - Example: [B_COMMAND_OP_RES | B_COMMAND_DEST_ALARM, B_ALARM_COMMAND_REMOVE, unused, STATUS]
-
-
-// TODO: assume only LED commands can be triggered?
-// GET LIST - Expected data: none
-// - Example: [B_COMMAND_OP_GET | B_COMMAND_DEST_ALARM, B_ALARM_COMMAND_LIST, unused]
-// RESPOND LIST - Response
-// - bytes 0: remove status
-// - Example: [B_COMMAND_OP_RES | B_COMMAND_DEST_ALARM, B_ALARM_COMMAND_LIST, unused, STATUS]
-
-
-// -- DEFINITIONS -- //
-
-// static bool IRAM_ATTR B_AlarmCallback(gptimer_handle_t timer, const gptimer_alarm_event_data_t* eventData, void* userData)
 // https://esp32.com/viewtopic.php?t=4978#p21478
 // ISR function must comply with the gptimer_alarm_cb_t definition
+// static bool IRAM_ATTR B_AlarmInterrupt(gptimer_handle_t timer, const gptimer_alarm_event_data_t* eventData, void* userData)
 // - Private function
 
-// static bool B_InitTimer(QueueHandle_t* alarmCommandQueue)
+// Does not do any sanitization or bounds checking, these should be done by the caller
+// static bool B_InsertAlarm(struct B_AlarmContainer* const container, B_timepart_t localTimepart, uint8_t days, const B_command_t* const triggerCommand, size_t commandSize);
 // - Private function
 
-// static void B_RestartTimer(int seconds)
+// static bool B_RemoveAlarm(struct B_AlarmContainer* const container, uint8_t index);
 // - Private function
-
-// static void B_CleanupTimer()
-// - Private function
-
-bool B_InsertAlarm(struct B_AlarmContainer* const container, const B_AlarmInfo_t* const newAlarm);
-
-bool B_RemoveAlarm(struct B_AlarmContainer* const container, int index);
 
 // static void B_PrintNextTriggerDelta(int returnValue)
 // - Private function
 
-// static int B_AlarmFindNextTrigger(const B_AlarmInfo_t* const alarm, const struct tm* const localTime)
+// static B_timepart_t B_AlarmFindNextTrigger(const B_AlarmInfo_t* const alarm, const struct tm* const localTime)
 // - Private function
 
-// static int B_AlarmFindNextTrigger2(const B_AlarmInfo_t* const alarm, const struct tm* const localTime)
+// static B_timepart_t B_AlarmFindNextTrigger2(const B_AlarmInfo_t* const alarm, const struct tm* const localTime)
 // - Private function
 // - Test
 
-// static int B_FindNextAlarm(int* outAlarmIndex)
+// static B_timepart_t B_FindNextAlarm(int* outAlarmIndex)
 // - Private function
 
-struct B_AlarmTaskParameter{
-	QueueHandle_t* alarmCommandQueue;
-	QueueHandle_t* tcpCommandQueue;
-	void (*handlerFunctionPointer)(const B_command_t* const);
+// static bool B_TimerInit(QueueHandle_t alarmCommandQueue)
+// - Private function
+
+// static void B_RestartTimer(B_timepart_t seconds)
+// - Private function
+
+// static void B_TimerCleanup()
+// - Private function
+
+struct B_AlarmTaskParameter {
+	B_addressMap_t* addressMap;
 };
 
 void B_AlarmTask(void* pvParameters);

@@ -13,7 +13,7 @@ menu "BarnaNetLibrary Menu"
 		config B_ALARM_CONTAINER_CAPACITY
 			int "Alarm container capacity"
 			default 10
-			range 5 20
+			range 1 255
 			help
 				The maximum storable alarm count
 	endmenu

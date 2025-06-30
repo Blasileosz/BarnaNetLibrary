@@ -7,18 +7,27 @@ B_timepart_t B_GetTimepart(time_t timestamp)
 	return timestamp % (24 * 3600);
 }
 
-B_timepart_t B_GetLocalTimepart(time_t timestamp)
-{
-	struct tm tm = { 0 }; // Local time
-	localtime_r(&timestamp, &tm);
-
-	return B_BuildTimepart(tm.tm_hour, tm.tm_min, tm.tm_sec);
-	//return GetTimePart(_mkgmtime(tm)); // Slow as hell
-}
-
 B_timepart_t B_BuildTimepart(int hours, int minutes, int seconds)
 {
 	return hours * 3600 + minutes * 60 + seconds;
+}
+
+int B_GetUTCOffset()
+{
+	time_t now = time(NULL);
+	struct tm localTM = { 0 };
+	localtime_r(&now, &localTM);
+
+	B_timepart_t localTimepart = B_BuildTimepart(localTM.tm_hour, localTM.tm_min, localTM.tm_sec);
+	B_timepart_t utcTimepart = B_GetTimepart(now);
+
+	return localTimepart - utcTimepart;
+}
+
+B_timepart_t B_GetLocalTimepart(B_timepart_t timepart)
+{
+	int utcOffset = B_GetUTCOffset();
+	return timepart + utcOffset;
 }
 
 int B_TimepartGetSeconds(B_timepart_t timePart)
@@ -61,7 +70,7 @@ bool B_SyncTime()
 	return true;
 }
 
-void B_DeinitSntp()
+void B_SntpCleanup()
 {
 	esp_netif_sntp_deinit();
 }

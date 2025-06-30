@@ -1,5 +1,7 @@
 #pragma once
 
+#define B_TASKID_TCP 1
+
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/event_groups.h>
@@ -18,20 +20,32 @@
 #include "B_SECRET.h"
 #include "B_BarnaNetCommand.h"
 
-// B_InitTCPServer()
+// Time in miliseconds to wait for a task to reply
+#define B_TCP_REPLY_TIMEOUT 1000
+
+struct B_TcpTaskParameter {
+	B_addressMap_t* addressMap;
+};
+
 // Inits the TCP server
 // Returns the server socket, but returns 0 if fails
 // - Private function
 // - !Runs in the TCP task
+// static int B_InitTCPServer()
 
-// B_TCPSendMessage
+// Dispatches the commands sent via TCP
+// - Private function
+// - !Runs in the TCP task
+// static void B_HandleTCPMessage(const B_command_t* const command, B_command_t* const responseCommand, B_addressMap_t* addressMap)
+
 // Send message to sock
 // Arguments: (int sock, const char *const sendBuffer, size_t bufferSize)
 // - Private function
 // - !Runs in the TCP task
+// static void B_TCPSendMessage(int sock, const char *const sendBuffer, size_t bufferSize)
 
 // Listens for TCP messages
 // - Blocking function
 // - !Runs in the TCP task
-// - Expected function pointer: void (*handlerFunctionPointer)(const char* const messageBuffer, int messageLen, char* const responseBufferOut, int* const responseLenOut)
+// - Expected parameter: B_TcpTaskParameter struct
 void B_TCPTask(void* pvParameters);
