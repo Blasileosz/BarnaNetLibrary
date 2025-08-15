@@ -13,6 +13,7 @@ typedef struct {
 	uint8_t from; // TASKID that sent the command
 	uint8_t dest; // TASKID to send the command to
 	uint8_t header; // Command OP and ID (see below)
+	// TODO: transmition ID (more in the TODO section of the README)
 
 	uint8_t body[B_COMMAND_BODY_SIZE];
 } B_command_t;

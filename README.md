@@ -2,13 +2,21 @@
 
 ## TODO
 - [x] Alarms
-- [ ] Test sunrise
+- [x] Test sunrise
+- [x] Azure IoT HUB integration
+	- The MQTT client only works with Azure at the moment
+- [ ] Clean up
+	- [ ] In all helper function, do check whether the pointer is NULL !!
+- [ ] Test TCP and MQTT connections against brute force attacks
+- [ ] Add transmition ID to the command structure
+	- TCP server would assign a transmition ID to each request and would map these IDs to client sockets
+	- Azure MQTT broker already gives an ID to the Direct Methods (when it is zero, the reply could immediately be discarded)
+	- The system cannot have multiple commands processing at the same time, since the whole server halts until the task replies
+- [ ] Test flashing from Github Codespace using port forwarding
 - [ ] Home Assistant integration
-- [ ] NVS: https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/storage/nvs_flash.html#application-example
-- [ ] Azure IoT https://github.com/espressif/esp-azure/tree/master is deprecated, see my Github stars
+- [x] NVS: https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/storage/nvs_flash.html#application-example
 - [ ] mDNS or a custom discovery protocol to see other BarnaNet devices
 - [ ] Manual connect to WIFI using the device as an AP and a web interface
-- [ ] Clean up
 
 ## Project structure
 - Some systems are implemented using FreeRTOS tasks
@@ -70,11 +78,17 @@ For definition, see [B_alarm.h](/B_alarm.h)
 - [ESP-IDF timer and alarm documentation](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/peripherals/gptimer.html)
 - Task function: `B_AlarmTask`
 - For the task parameter, the given `B_AlarmTaskParameter` struct should be filled
-- Calculates the next alarm to be triggered, starts its timer and when the timer reaches the delta, it fires an ISR
-- The ISR then sends a command to the task to trigger the alarm's trigger-command
-- The task then forwards the trigger-command to its destination
+- The alarm container has a finite capacity as specified in the menuconfig
+- Persistent alarm storage
+	- Alarms are stored in the NVS
+	- The whole buffer is stored, even if it is not full (ie. the uninitialized parts as well)
+	- When changing the B_AlarmInfo_t structure, it is best to run `idf.py erase-flash` to guarantee smooth loading
+	- When the container capacity is changed in the menuconfig, the loading method will handle that gracefully
+- Flow
+	- Calculates the next alarm to be triggered, starts its timer and when the timer reaches the delta, it fires an ISR
+	- The ISR then sends a command to the task to trigger the alarm's trigger-command
+	- The task then forwards the trigger-command to its destination
 - To add, remove, list or inspect alarms, please see the API
-- The alarm container has a finite size as specified in the menuconfig
 
 ## WIFI
 For definition, see [B_wifi.h](/B_wifi.h)
@@ -85,3 +99,34 @@ For definition, see [B_wifi.h](/B_wifi.h)
 ## COLOR
 For definition, see [B_colorUtil.h](/B_colorUtil.h)
 - Defines an RGB structure and several color manipulation functions
+
+## MQTT
+- The backend is Azure IoT Hub
+- Could use the [Azure ESP SDK](https://learn.microsoft.com/en-us/azure/iot/tutorial-devkit-espressif-esp32-freertos-iot-hub) or an [MQTT client](https://learn.microsoft.com/en-us/azure/iot/iot-mqtt-connect-to-iot-hub) to interface with the backend
+	- The SDK is more robust, supporting more enterprise features like Digital Twins (reqires the [Azure IoT FreeRTOS Middleware](https://github.com/Azure/azure-iot-middleware-freertos/tree/main) and the [Azure SDK for C](https://github.com/Azure/azure-sdk-for-c/tree/main)) [examples](https://github.com/Azure/azure-sdk-for-c/blob/main/sdk/samples/iot/README.md)
+	- MQTT is more low level [example with mosquitto](https://github.com/Azure-Samples/IoTMQTTSample/tree/master)
+- This project uses the latter option with the [ESP-MQTT](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/protocols/mqtt.html) library
+- MQTT Broker authentication
+	- SAS (Shared Access Signature) string
+		- This string needs to be generated using the Azure CLI: `az iot hub generate-sas-token --hub-name BarnaNet-IoTHubwork --device-id BB0 --duration 7200`
+		- In order to be able to do this, DisableLocalAuth needs to be false, to enable local authentication
+		- To enable local auth: `az iot hub update --name <IoTHubName> --resource-group <ResourceGroupName> --set properties.disableLocalAuth=false`
+		- For the TLS session, the CA cert is also required: [DigiCert Global Root G2 root certificate](https://www.digicert.com/kb/digicert-root-certificates.htm#otherroots)
+	- X.509 certificate
+		- Each client requires a client certificate and a client key that it presents to the server. The server checks whether the presented cert any key was created from the root CA certificate.
+		- For this project the root CA certificate was self signed, otherwise the CA cert would have been purchased from a security firm like Entrust
+		- Generating the certificates can be done with the OpenSSL CLI ([documentation](https://learn.microsoft.com/en-us/azure/iot-hub/tutorial-x509-test-certs))
+		- For simplicity, I used a program called [XCA](https://hohnstaedt.de/xca/)
+		- The CA certificate needs to be uploaded to the IoT Hub under the certificates tab
+			- Note that XCA exports the cert as a .crt file, while Azure is expecting a .pem file, the solution is to just change the extension
+			- The client certificate and key must have the same name as the device provisioned under the devices tab (BB0.crt and BB0.key)
+- IoT HUB MQTT messages
+	- `devices/{device_id}/messages/devicebound/#` topic receives messages Cloud to Device
+	- `devices/{device_id}/messages/events` topic sends messages Device to Cloud
+- Direct Methods
+	- https://learn.microsoft.com/en-us/azure/iot-hub/iot-hub-devguide-direct-methods#handle-a-direct-method-on-a-device
+- Device Twin
+	- [ ] https://learn.microsoft.com/en-us/azure/iot/iot-mqtt-connect-to-iot-hub#retrieve-device-twin-properties
+- To parse JSON data, use the [cJSON library](https://deepwiki.com/DaveGamble/cJSON) build into ESP-IDF
+	- Component register "json"
+	- Include cJSON.h

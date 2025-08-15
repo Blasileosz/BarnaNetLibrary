@@ -25,6 +25,10 @@
 #include "B_tcpServer.h"
 #include "B_time.h"
 
+#define B_ALARM_NVS_NAMESPACE "B_ALARM"
+#define B_ALARM_NVS_CONTAINER_SIZE "B_ALARM_SIZE"
+#define B_ALARM_NVS_BUFFER "B_ALARM_BUFFER"
+
 // Cpu freq is configured in the menuconfig an is defined: CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ
 // APB_CLK (GPTIMER_CLK_SRC_DEFAULT) is highly dependent on the CPU_CLK source
 // https://docs.espressif.com/projects/esp-idf/en/v5.3.2/esp32/api-reference/peripherals/clk_tree.html
@@ -65,10 +69,14 @@ typedef struct {
 	B_command_t triggerCommand;
 } B_AlarmInfo_t;
 
+// Buffer capacity is defined in the menuconfig
 struct B_AlarmContainer {
 	uint8_t size;
 	B_AlarmInfo_t* buffer;
 };
+
+// How many bytes the buffer takes up
+#define B_ALARM_CONTAINER_BUFFER_SIZE (CONFIG_B_ALARM_CONTAINER_CAPACITY * sizeof(B_AlarmInfo_t))
 
 enum B_ALARM_COMMAND_IDS {
 	B_ALARM_COMMAND_TRIGGER, // Used only internally, to signal to task from ISR
@@ -84,13 +92,6 @@ enum B_ALARM_COMMAND_IDS {
 // static bool IRAM_ATTR B_AlarmInterrupt(gptimer_handle_t timer, const gptimer_alarm_event_data_t* eventData, void* userData)
 // - Private function
 
-// Does not do any sanitization or bounds checking, these should be done by the caller
-// static bool B_InsertAlarm(struct B_AlarmContainer* const container, B_timepart_t localTimepart, uint8_t days, const B_command_t* const triggerCommand, size_t commandSize);
-// - Private function
-
-// static bool B_RemoveAlarm(struct B_AlarmContainer* const container, uint8_t index);
-// - Private function
-
 // static void B_PrintNextTriggerDelta(int returnValue)
 // - Private function
 
@@ -102,6 +103,20 @@ enum B_ALARM_COMMAND_IDS {
 // - Test
 
 // static B_timepart_t B_FindNextAlarm(int* outAlarmIndex)
+// - Private function
+
+// static void B_LoadAlarmsFromNVS()
+// Must be called after the AlarmContainer buffer has been initialized!
+// - Private function
+
+// static void B_SaveAlarmsToNVS()
+// - Private function
+
+// static bool B_InsertAlarm(struct B_AlarmContainer* const container, B_timepart_t localTimepart, uint8_t days, const B_command_t* const triggerCommand, size_t commandSize);
+// Does not do any sanitization or bounds checking, these should be done by the caller
+// - Private function
+
+// static bool B_RemoveAlarm(struct B_AlarmContainer* const container, uint8_t index);
 // - Private function
 
 // static bool B_TimerInit(QueueHandle_t alarmCommandQueue)

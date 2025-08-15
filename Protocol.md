@@ -19,36 +19,36 @@
 
 
 ### INSERT
-- OP: SET
 - ID: 1
-- Request layout: `[TIMEPART0, TIMEPART1, TIMEPART2, TIMEPART3, DAYS, COMMAND * (B_COMMAND_BODY_SIZE - 5)]`
-	- TIMEPART: An unsigned 32bit value that stores the trigger time in seconds
-	- DAYS: An 8bit binary set that indicates which days the alarm should trigger
-	- COMMAND: A buffer to store the command to be executed when the alarm triggers
-		- Cannot store a whole B_COMMAND_STRUCT_SIZE long command due to being restrained by itself
-- Response layout: A plaintext status
+- OP: SET
+	- Request layout: `[TIMEPART0, TIMEPART1, TIMEPART2, TIMEPART3, DAYS, COMMAND * (B_COMMAND_BODY_SIZE - 5)]`
+		- TIMEPART: An unsigned 32bit value that stores the trigger time in seconds
+		- DAYS: An 8bit binary set that indicates which days the alarm should trigger
+		- COMMAND: A buffer to store the command to be executed when the alarm triggers
+			- Cannot store a whole B_COMMAND_STRUCT_SIZE long command due to being restrained by itself
+	- Response layout: A plaintext status
 
 ### REMOVE
-- OP: SET
 - ID: 2
-- Request layout: `[INDEX]`
-	- INDEX: The index of the alarm to be removed
-- Response layout: A plaintext status
+- OP: SET
+	- Request layout: `[INDEX]`
+		- INDEX: The index of the alarm to be removed
+	- Response layout: A plaintext status
 
 ### LIST
-- OP: GET
 - ID: 3
-- Request layout: `No data required`
-- Response layout: `[TIMEPART0_0, TIMEPART1_0, TIMEPART2_0, TIMEPART3_0, DAYS_0, TIMEPART0_1, TIMEPART1_1, TIMEPART2_1, TIMEPART3_1, DAYS_1, ...]`
-	- TIMEPART: An unsigned 32bit value that stores the trigger time in seconds
-	- DAYS: An 8bit binary set that indicates which days the alarm should trigger
-	- The alarms are listed in order every 5 byte
+- OP: GET
+	- Request layout: `No data required`
+	- Response layout: `[TIMEPART0_0, TIMEPART1_0, TIMEPART2_0, TIMEPART3_0, DAYS_0, TIMEPART0_1, TIMEPART1_1, TIMEPART2_1, TIMEPART3_1, DAYS_1, ...]`
+		- TIMEPART: An unsigned 32bit value that stores the trigger time in seconds
+		- DAYS: An 8bit binary set that indicates which days the alarm should trigger
+		- The alarms are listed in order every 5 byte
 
 ### INSPECT
-- OP: GET
 - ID: 4
-- Request layout: `[INDEX]`
-	- INDEX: The index of the alarm to be inspected
-- Response layout: `[COMMAND * B_COMMAND_BODY_SIZE]`
-	- COMMAND: The trigger command of the selected alarm
-		- Max length is determined by the command structure
+- OP: GET
+	- Request layout: `[INDEX]`
+		- INDEX: The index of the alarm to be inspected
+	- Response layout: `[COMMAND * B_COMMAND_BODY_SIZE]`
+		- COMMAND: The trigger command of the selected alarm
+			- Max length is determined by the command structure

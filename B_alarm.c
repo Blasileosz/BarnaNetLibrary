@@ -24,39 +24,6 @@ static bool IRAM_ATTR B_AlarmInterrupt(gptimer_handle_t timer, const gptimer_ala
 	return highPriorityTaskWoken == pdTRUE;
 }
 
-static bool B_InsertAlarm(struct B_AlarmContainer* const container, B_timepart_t localTimepart, uint8_t days, const B_command_t* const triggerCommand, size_t commandSize)
-{
-	if (container->buffer == NULL || container->size >= CONFIG_B_ALARM_CONTAINER_CAPACITY) {
-		ESP_LOGI(alarmTag, "Failed to insert alarm into container");
-		return false;
-	}
-
-	container->buffer[container->size].localTimepart = localTimepart;
-	container->buffer[container->size].days = days;
-	memset(&container->buffer[container->size].triggerCommand, 0, sizeof(B_command_t)); // Clear buffer just in case
-	memcpy(&container->buffer[container->size].triggerCommand, triggerCommand, commandSize);
-	container->size++;
-	return true;
-}
-
-static bool B_RemoveAlarm(struct B_AlarmContainer* const container, uint8_t index)
-{
-	if (container->buffer == NULL || index >= container->size) {
-		ESP_LOGI(alarmTag, "Failed to remove alarm from container");
-		return false;
-	}
-	
-	container->size--;
-	if (container->size == 0)
-		return true;
-
-	// Copy from back of the buffer to the index
-	container->buffer[index].localTimepart = container->buffer[container->size].localTimepart;
-	container->buffer[index].days = container->buffer[container->size].days;
-	memcpy(&container->buffer[index].triggerCommand, &container->buffer[container->size].triggerCommand, sizeof(B_command_t));
-	return true;
-}
-
 static void B_PrintNextTriggerDelta(int returnValue)
 {
 	ESP_LOGI(alarmTag, "%i days, %02i:%02i:%02i", (returnValue / (24 * 3600)), B_TimepartGetHours(returnValue), B_TimepartGetMinutes(returnValue), B_TimepartGetSeconds(returnValue));
@@ -146,8 +113,124 @@ static B_timepart_t B_FindNextAlarm(int* outAlarmIndex)
 	return minTrigTime;
 }
 
+static void B_LoadAlarmsFromNVS()
+{
+	nvs_handle_t nvsHandle;
+	esp_err_t err = nvs_open(B_ALARM_NVS_NAMESPACE, NVS_READONLY, &nvsHandle);
+
+	// Namespace not yet initialized, it does by saving a value to it
+	if (err == ESP_ERR_NVS_NOT_FOUND) {
+		ESP_LOGI(alarmTag, "NVS namespace not yet initialized");
+		return;
+	}
+
+	// Read stored alarm container size
+	uint8_t containerSize = 0; // Alarm count
+	 err = nvs_get_u8(nvsHandle, B_ALARM_NVS_CONTAINER_SIZE, &containerSize);
+	if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND)
+		ESP_ERROR_CHECK(err);
+
+	if (containerSize == 0) {
+		ESP_LOGI(alarmTag, "No alarms stored in NVS");
+		nvs_close(nvsHandle);
+		return;
+	}
+		
+	// Read the stored buffer size in bytes
+	size_t requiredBufferSize = 0; // Size in bytes
+	err = nvs_get_blob(nvsHandle, B_ALARM_NVS_BUFFER, NULL, &requiredBufferSize);
+	if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND)
+		ESP_ERROR_CHECK(err);
+
+	// Check if the buffer size aligns with the B_AlarmInfo_t structure size
+	if (requiredBufferSize % sizeof(B_AlarmInfo_t) != 0) {
+		// Structure does not align, probably changed, do not load
+		ESP_LOGW(alarmTag, "B_AlarmInfo_t struct and buffer size stored in NVS do not align, erasing flash");
+		nvs_flash_erase();
+		nvs_close(nvsHandle);
+		return;
+	}
+
+	// Check if the capacity changed 
+	if (CONFIG_B_ALARM_CONTAINER_CAPACITY < containerSize) {
+		ESP_LOGW(alarmTag, "Alarm container capacity config value lowered");
+		requiredBufferSize = CONFIG_B_ALARM_CONTAINER_CAPACITY * sizeof(B_AlarmInfo_t);
+	}
+
+	err = nvs_get_blob(nvsHandle, B_ALARM_NVS_BUFFER, alarmContainer.buffer, &requiredBufferSize);
+	if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND)
+		ESP_ERROR_CHECK(err);
+
+	alarmContainer.size = containerSize;
+
+	nvs_close(nvsHandle);
+
+	ESP_LOGI(alarmTag, "Alarms loaded from NVS");
+}
+
+static void B_SaveAlarmsToNVS()
+{
+	nvs_handle_t nvsHandle;
+	ESP_ERROR_CHECK(nvs_open(B_ALARM_NVS_NAMESPACE, NVS_READWRITE, &nvsHandle));
+
+	ESP_ERROR_CHECK(nvs_set_u8(nvsHandle, B_ALARM_NVS_CONTAINER_SIZE, alarmContainer.size));
+	ESP_ERROR_CHECK(nvs_set_blob(nvsHandle, B_ALARM_NVS_BUFFER, (const void*)alarmContainer.buffer, B_ALARM_CONTAINER_BUFFER_SIZE));
+
+	ESP_ERROR_CHECK(nvs_commit(nvsHandle));
+	nvs_close(nvsHandle);
+
+	ESP_LOGI(alarmTag, "Alarms saved to NVS");
+}
+
+static bool B_InsertAlarm(struct B_AlarmContainer* const container, B_timepart_t localTimepart, uint8_t days, const B_command_t* const triggerCommand, size_t commandSize)
+{
+	if (container->buffer == NULL || container->size >= CONFIG_B_ALARM_CONTAINER_CAPACITY) {
+		ESP_LOGI(alarmTag, "Failed to insert alarm into container");
+		return false;
+	}
+
+	container->buffer[container->size].localTimepart = localTimepart;
+	container->buffer[container->size].days = days;
+	memset(&container->buffer[container->size].triggerCommand, 0, sizeof(B_command_t)); // Clear buffer just in case
+	memcpy(&container->buffer[container->size].triggerCommand, triggerCommand, commandSize);
+	container->size++;
+
+	B_SaveAlarmsToNVS();
+
+	return true;
+}
+
+static bool B_RemoveAlarm(struct B_AlarmContainer* const container, uint8_t index)
+{
+	if (container->buffer == NULL || index >= container->size) {
+		ESP_LOGI(alarmTag, "Failed to remove alarm from container");
+		return false;
+	}
+	
+	container->size--;
+	if (container->size == 0)
+		return true;
+
+	// Copy from back of the buffer to the index
+	container->buffer[index].localTimepart = container->buffer[container->size].localTimepart;
+	container->buffer[index].days = container->buffer[container->size].days;
+	memcpy(&container->buffer[index].triggerCommand, &container->buffer[container->size].triggerCommand, sizeof(B_command_t));
+
+	B_SaveAlarmsToNVS();
+
+	return true;
+}
+
 static bool B_TimerInit(QueueHandle_t alarmCommandQueue)
 {
+	// Allocate alarm container (memory is zero initialized at insert time)
+	alarmContainer.buffer = malloc(B_ALARM_CONTAINER_BUFFER_SIZE);
+	if (alarmContainer.buffer == NULL)
+		return false;
+
+	// Load saved alarms from NVS
+	B_LoadAlarmsFromNVS();
+
 	// Create timer
 	// The internal counter value defaults to zero
 	gptimer_config_t timerConfig = {
@@ -187,12 +270,6 @@ static bool B_TimerInit(QueueHandle_t alarmCommandQueue)
 	// Start timer if an alarm was selected, otherwise RestartTimer will start it later
 	if (selectedAlarmIndex != -1)
 		ESP_ERROR_CHECK(gptimer_start(alarmTimer));
-
-
-	// Allocate alarm container (memory is zero initialized at insert time)
-	alarmContainer.buffer = malloc(CONFIG_B_ALARM_CONTAINER_CAPACITY * sizeof(B_AlarmInfo_t));
-	if (alarmContainer.buffer == NULL)
-		return false;
 
 	ESP_LOGI(alarmTag, "Timer configured");
 	return true;
@@ -243,21 +320,6 @@ void B_AlarmTask(void* pvParameters)
 		ESP_LOGE(alarmTag, "Failed to create the alarm, aborting startup");
 		vTaskDelete(NULL);
 	}
-
-	// Test ---
-	B_command_t testCommand = {.from = B_TASKID_ALARM, .dest = 3, .header = B_COMMAND_OP_SET | 1};
-	testCommand.body[0] = 255;
-	testCommand.body[1] = 255;
-	testCommand.body[2] = 255;
-	testCommand.body[3] = 0;
-	testCommand.body[4] = 0;
-
-	// B_InsertAlarm(&alarmContainer, B_BuildTimepart(16, 55, 00), B_EVERYDAY, &testCommand, 8);
-
-	// B_InsertAlarm(&alarmContainer, B_BuildTimepart(17, 00, 0), B_EVERYDAY, &testCommand, 8);
-
-	B_InsertAlarm(&alarmContainer, B_ALARM_TRIGGER_SUNSET, B_EVERYDAY, &testCommand, 8);
-	// ---
 
 	while (true) {
 		// Block until a command is received

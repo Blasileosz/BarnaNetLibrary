@@ -2,6 +2,8 @@
 
 // Command helper functions
 
+// TODO: The command cannot be null, but there is no check in place
+
 void B_FillCommandHeader(B_command_t* const command, uint8_t from, uint8_t dest, uint8_t operation, uint8_t ID)
 {
 	command->from = from;
@@ -20,7 +22,7 @@ void B_FillCommandBodyString(B_command_t* const command, const char* const strin
 bool B_SendStatusReply(B_addressMap_t* addressMap, uint8_t from, uint8_t dest, uint8_t commandOP, uint8_t commandID, const char* const string) {
 
 	unsigned int destFlags = 0;
-	QueueHandle_t destQueue = B_GetAddressAndFlags(addressMap, dest, &destFlags);
+	QueueHandle_t destQueue = B_GetAddressAndFlags(addressMap, dest, &destFlags); // TODO: Validate destQueue
 
 	// Don't send reply if the task doesn't want it
 	if (destFlags & B_TASK_FLAG_NO_STATUS_REPLY)
@@ -51,6 +53,16 @@ bool B_AddressMapInit(B_addressMap_t* addressMap, int size)
 
 void B_AddressmapCleanup(B_addressMap_t* addressMap)
 {
+	if (addressMap->addressList == NULL)
+		return;
+	
+	// Delete the queues
+	for (int i = 0; i < addressMap->mapSize; i++) {
+		if (addressMap->addressList[i].queueHandle != NULL) {
+			vQueueDelete(addressMap->addressList[i].queueHandle);
+		}
+	}
+
 	free(addressMap->addressList);
 	addressMap->addressList = NULL;
 	addressMap->mapSize = 0;
