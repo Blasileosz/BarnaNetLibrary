@@ -1,6 +1,9 @@
 #include "B_tcpServer.h"
 
-static const char* tcpTag = "BarnaNet - TCP";
+static const char* tcpITag = "BarnaNet - TCP Ingress";
+static const char* tcpETag = "BarnaNet - TCP Egress";
+
+static struct B_TCPEgressTaskParameter tcpEgressTaskParameter = { 0 };
 
 // Inits the TCP server
 // Returns the server socket, but returns 0 if fails
@@ -19,7 +22,7 @@ static int B_InitTCPServer()
 	// Create server socket
 	serverSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
 	if (serverSocket < 0) {
-		ESP_LOGE(tcpTag, "Unable to create socket: errno %d", errno);
+		ESP_LOGE(tcpITag, "Unable to create socket: errno %d", errno);
 		return 0;
 	}
 
@@ -27,66 +30,58 @@ static int B_InitTCPServer()
 	int opt = 1;
 	setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-	ESP_LOGI(tcpTag, "Socket created");
+	ESP_LOGI(tcpITag, "Socket created");
 
 	// Bind socket
 	int err = bind(serverSocket, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
 	if (err != 0) {
-		ESP_LOGE(tcpTag, "Socket unable to bind: errno %d", errno);
-		ESP_LOGE(tcpTag, "IPPROTO: %d", AF_INET);
+		ESP_LOGE(tcpITag, "Socket unable to bind: errno %d", errno);
+		ESP_LOGE(tcpITag, "IPPROTO: %d", AF_INET);
 		close(serverSocket);
 		return 0;
 	}
-	ESP_LOGI(tcpTag, "Socket bound to port %d", CONFIG_B_TCP_PORT);
+	ESP_LOGI(tcpITag, "Socket bound to port %d", CONFIG_B_TCP_PORT);
 
 	// Start listening
 	err = listen(serverSocket, 1);
 	if (err != 0) {
-		ESP_LOGE(tcpTag, "Error occurred during listen: errno %d", errno);
+		ESP_LOGE(tcpITag, "Error occurred during listen: errno %d", errno);
 		close(serverSocket);
 		return 0;
 	}
 
-	ESP_LOGI(tcpTag, "Socket listening");
+	ESP_LOGI(tcpITag, "Socket listening");
 	return serverSocket;
 }
 
 // Dispatches the commands sent via TCP
+// Doesn't return error, instead fills the responseCommand with an error message and sends it to the egress task
 // - Private function
 // - !Runs in the TCP task
-static void B_HandleTCPMessage(const B_command_t* const command, B_command_t* const responseCommand, B_addressMap_t* addressMap)
+static void B_HandleTCPMessage(B_addressMap_t* const addressMap, B_command_t* const command, uint8_t transmissionID)
 {
+	if (addressMap == NULL || command == NULL || transmissionID == 0) {
+		ESP_LOGE(tcpITag, "Invalid parameters supplied to B_HandleTCPMessage");
+		return;
+	}
+
 	// Sanitize request type
 	if (B_COMMAND_OP(command->header) == B_COMMAND_OP_RES || B_COMMAND_OP(command->header) == B_COMMAND_OP_ERR) {
-		ESP_LOGW(tcpTag, "Invalid request type");
-		B_FillCommandHeader(responseCommand, B_TASKID_TCP, command->dest, B_COMMAND_OP_ERR, B_COMMAND_ID(command->header));
-		B_FillCommandBodyString(responseCommand, "Invalid request type");
+		ESP_LOGW(tcpITag, "Invalid request type");
+
+		command->dest = B_TASKID_TCP; // Hack to send it to its egress task and back to the client
+		command->transmissionID = transmissionID;
+		B_SendStatusReply(addressMap, command, B_TASKID_TCP, B_COMMAND_OP_ERR, "Invalid request type");
 		return;
 	}
 
-	// Select task to relay command
-	QueueHandle_t destAddress = B_GetAddress(addressMap, command->dest);
-	if (destAddress == NULL || command->dest == B_TASKID_TCP) {
-		ESP_LOGW(tcpTag, "Invalid DEST");
-		B_FillCommandHeader(responseCommand, B_TASKID_TCP, command->dest, B_COMMAND_OP_ERR, B_COMMAND_ID(command->header));
-		B_FillCommandBodyString(responseCommand, "Invalid DEST");
-		return;
-	}
+	if (!B_RelayCommand(addressMap, command, B_TASKID_TCP, transmissionID)) {
+		ESP_LOGE(tcpITag, "Failed to relay command");
 
-	// Relay the command to the selected task
-	if (xQueueSend(destAddress, (void* const)command, 0) != pdPASS) {
-		ESP_LOGE(tcpTag, "Command unable to be inserted into the queue");
-		B_FillCommandHeader(responseCommand, B_TASKID_TCP, command->dest, B_COMMAND_OP_ERR, B_COMMAND_ID(command->header));
-		B_FillCommandBodyString(responseCommand, "INTERNAL: Relay error");
+		command->dest = B_TASKID_TCP; // Hack to send it to its egress task and back to the client
+		command->transmissionID = transmissionID;
+		B_SendStatusReply(addressMap, command, B_TASKID_TCP, B_COMMAND_OP_ERR, "INTERNAL: Relay error");
 		return;
-	}
-
-	// Always wait for reply
-	QueueHandle_t tcpQueue = B_GetAddress(addressMap, B_TASKID_TCP);
-	if (xQueueReceive(tcpQueue, (void* const)responseCommand, pdMS_TO_TICKS(B_TCP_REPLY_TIMEOUT)) != pdPASS) {
-		ESP_LOGE(tcpTag, "Recipient did not reply to the command");
-		B_FillCommandHeader(responseCommand, B_TASKID_TCP, command->dest, B_COMMAND_OP_ERR, B_COMMAND_ID(command->header));
-		B_FillCommandBodyString(responseCommand, "Recipient did not reply to the command");
 	}
 }
 
@@ -96,41 +91,102 @@ static void B_HandleTCPMessage(const B_command_t* const command, B_command_t* co
 // - !Runs in the TCP task
 static void B_TCPSendMessage(int sock, const char *const sendBuffer, size_t bufferSize)
 {
+	if (sock < 0 || sendBuffer == NULL || bufferSize == 0) {
+		ESP_LOGE(tcpETag, "Invalid parameters in B_TCPSendMessage");
+		return;
+	}
+
 	// Send data in chunks if not able to send it in one go
 	size_t toWrite = bufferSize;
 	while (toWrite > 0) {
 		int written = send(sock, sendBuffer + (bufferSize - toWrite), toWrite, 0);
 		if (written < 0) {
-			ESP_LOGE(tcpTag, "Error occurred during sending: errno %d", errno);
+			ESP_LOGE(tcpETag, "Error occurred during sending: errno %d", errno);
 			return;
 		}
 		toWrite -= written;
 	}
 }
 
+// Listens for replies to the TCP messages
+// - Blocking function
+// - !Runs in the TCP Egress task
+// - Expected parameter: B_TCPEgressTaskParameter struct
+static void B_TCPEgressTask(void* pvParameters)
+{
+	const struct B_TCPEgressTaskParameter* const taskParameter = (const struct B_TCPEgressTaskParameter* const)pvParameters;
+	if (taskParameter == NULL || taskParameter->addressMap == NULL || taskParameter->socketSet == NULL) {
+		ESP_LOGE(tcpITag, "The supplied task parameter is invalid, aborting startup");
+		vTaskDelete(NULL);
+	}
+
+	B_addressMap_t* addressMap = taskParameter->addressMap;
+	fd_set* socketSet = taskParameter->socketSet;
+
+	QueueHandle_t tcpQueue = B_GetAddress(addressMap, B_TASKID_TCP);
+	if (tcpQueue == B_ADDRESS_MAP_INVALID_QUEUE) {
+		ESP_LOGE(tcpETag, "The TCP queue is invalid, aborting startup");
+		vTaskDelete(NULL);
+	}
+
+	ESP_LOGI(tcpETag, "Started TCP egress task");
+
+	while (true) {
+		B_command_t responseCommand = { 0 };
+		if (xQueueReceive(tcpQueue, &responseCommand, portMAX_DELAY) != pdTRUE) {
+			ESP_LOGE(tcpETag, "Failed to receive command from the TCP queue, discarding");
+			continue;
+		}
+
+		//ESP_LOGI(tcpETag, "Got command from queue: from=%u, dest=%u, header=%u, transmissionID=%u", responseCommand.from, responseCommand.dest, responseCommand.header, responseCommand.transmissionID);
+		//ESP_LOG_BUFFER_HEXDUMP(tcpETag, &responseCommand, sizeof(responseCommand), ESP_LOG_INFO);
+
+		// Check if the socket is still alive
+		// The default socket (transmissionID) is 0, but the server or any socket is unlikely to be 0 (mostly 56 or higher)
+		if (!FD_ISSET(responseCommand.transmissionID, socketSet)) {
+			ESP_LOGW(tcpETag, "Socket is no longer alive");
+			continue;
+		}
+
+		// Send the response back
+		B_TCPSendMessage(responseCommand.transmissionID, (const char*)&responseCommand, sizeof(responseCommand));
+	}
+
+	// Task paniced
+	// Task doesn't own the sockets, so it doesn't need to close them
+	vTaskDelete(NULL);
+}
+
 // Listens for TCP messages
 // - Blocking function
-// - !Runs in the TCP task
-// - Expected parameter: B_TcpTaskParameter struct
-void B_TCPTask(void* pvParameters)
+// - !Runs in the TCP Ingress task
+// - Expected parameter: B_TCPIngressTaskParameter struct
+void B_TCPIngressTask(void* pvParameters)
 {
-	const struct B_TcpTaskParameter* const taskParameter = (const struct B_TcpTaskParameter* const)pvParameters;
+	const struct B_TCPIngressTaskParameter* const taskParameter = (const struct B_TCPIngressTaskParameter* const)pvParameters;
 	if (taskParameter == NULL || taskParameter->addressMap == NULL) {
-		ESP_LOGE(tcpTag, "The supplied task parameter is invalid, aborting startup");
+		ESP_LOGE(tcpITag, "The supplied task parameter is invalid, aborting startup");
 		vTaskDelete(NULL);
 	}
 
 	int serverSocket = B_InitTCPServer();
 	if (serverSocket == 0) {
-		ESP_LOGE(tcpTag, "TCP server startup failed, aborting task");
+		ESP_LOGE(tcpITag, "TCP server startup failed, aborting task");
 		close(serverSocket);
 		vTaskDelete(NULL);
 	}
 
-	struct fd_set socketSet = { 0 };
+	// Set up the connection set
+	fd_set socketSet = { 0 };
 	FD_ZERO(&socketSet); // Clear the set
 	FD_SET(serverSocket, &socketSet); // Add tcpSocket to set
 
+	// Start the egress task
+	tcpEgressTaskParameter.addressMap = taskParameter->addressMap;
+	tcpEgressTaskParameter.socketSet = &socketSet;
+	xTaskCreate(B_TCPEgressTask, "B_TCPEgressTask", 1024 * 3, &tcpEgressTaskParameter, 3, NULL);
+
+	// Set up tcp keepalive option
 	char addr_str[128];
 	int keepAlive = LWIP_TCP_KEEPALIVE;
 	int keepIdle = 5;
@@ -172,7 +228,7 @@ void B_TCPTask(void* pvParameters)
 
 				int newSock = accept(serverSocket, (struct sockaddr*)&clientAddress, &clientAddrlen);
 				if (newSock < 0) {
-					ESP_LOGE(tcpTag, "Unable to accept new connection: errno %d", errno);
+					ESP_LOGE(tcpITag, "Unable to accept new connection: errno %d", errno);
 					continue;
 				}
 
@@ -193,20 +249,20 @@ void B_TCPTask(void* pvParameters)
 					inet6_ntoa_r(((struct sockaddr_in6*)&clientAddress)->sin6_addr, addr_str, sizeof(addr_str) - 1);
 				}
 
-				ESP_LOGI(tcpTag, "New connection #%i: (%s)", newSock, addr_str);
+				ESP_LOGI(tcpITag, "New connection #%i: (%s)", newSock, addr_str);
 				continue;
 			}
 
 			// New message
-			B_command_t messageBuffer = { 0 };
-			int messageLen = recv(nthSock, (void*)&messageBuffer, sizeof(B_command_t), 0);
-			//ESP_LOGI(tcpTag, "Received %d bytes from socket #%i", messageLen, nthSock);
+			char receiveBuffer[sizeof(B_command_t)] = { 0 };
+			int messageLen = recv(nthSock, (void*)&receiveBuffer, sizeof(B_command_t), 0);
+			//ESP_LOGI(tcpITag, "Received %d bytes from socket #%i", messageLen, nthSock);
 
 			// Client error
 			if (messageLen < 0) {
 				closesocket(nthSock);
 				FD_CLR(nthSock, &socketSet);
-				ESP_LOGE(tcpTag, "Error occurred during receiving from #%i: errno %d", nthSock, errno);
+				ESP_LOGE(tcpITag, "Error occurred during receiving from #%i: errno %d", nthSock, errno);
 				continue;
 			}
 
@@ -214,21 +270,12 @@ void B_TCPTask(void* pvParameters)
 			if (messageLen == 0) {
 				closesocket(nthSock);
 				FD_CLR(nthSock, &socketSet);
-				ESP_LOGI(tcpTag, "Connection closed #%i", nthSock);
+				ESP_LOGI(tcpITag, "Connection closed #%i", nthSock);
 				continue;
 			}
-
-			// Fill the receive command's from field
-			messageBuffer.from = B_TASKID_TCP;
-
-			// Create response command buffer and initialize it to a generic OK response
-			B_command_t responseBuffer = { 0 };
 			
 			// Dispatch message handling
-			B_HandleTCPMessage((const B_command_t* const)&messageBuffer, &responseBuffer, taskParameter->addressMap);
-
-			// Respond every time
-			B_TCPSendMessage(nthSock, (const char* const)&responseBuffer, sizeof(B_command_t));
+			B_HandleTCPMessage(taskParameter->addressMap, (B_command_t* const)&receiveBuffer, nthSock);
 		}
 	}
 
@@ -242,5 +289,8 @@ void B_TCPTask(void* pvParameters)
 		FD_CLR(sock, &socketSet);
 		close(sock);
 	}
+
+	tcpEgressTaskParameter.socketSet = NULL;
+
 	vTaskDelete(NULL);
 }

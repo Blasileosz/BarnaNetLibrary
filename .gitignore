@@ -1,2 +1,3 @@
 B_SECRET.h
-certs/
+certs/*
+!certs/*.md

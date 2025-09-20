@@ -28,7 +28,7 @@
 
 #include "B_BarnaNetCommand.h"
 
-// Time in miliseconds to wait for a task to reply
+// Time in milliseconds to wait for a task to reply
 #define B_MQTT_REPLY_TIMEOUT 1000
 
 #define B_IOT_HUB_NAME	"BarnaNet-IoTHubwork"
@@ -47,8 +47,8 @@ extern const uint8_t _binary_DigiCertGlobalRootG2_crt_pem_start[]	asm("_binary_D
 #endif
 extern const uint8_t _binary_DigiCertGlobalRootG2_crt_pem_end[]	asm("_binary_DigiCertGlobalRootG2_crt_pem_end");
 
-extern const uint8_t _binary_BarnaNet_CA_crt_start[]	asm("_binary_BarnaNet_CA_crt_start");
-extern const uint8_t _binary_BarnaNet_CA_crt_end[]	asm("_binary_BarnaNet_CA_crt_end");
+// extern const uint8_t _binary_BarnaNet_CA_crt_start[]	asm("_binary_BarnaNet_CA_crt_start");
+// extern const uint8_t _binary_BarnaNet_CA_crt_end[]	asm("_binary_BarnaNet_CA_crt_end");
 
 extern const uint8_t _binary_BB0_crt_start[]	asm("_binary_BB0_crt_start");
 extern const uint8_t _binary_BB0_crt_end[]	asm("_binary_BB0_crt_end");
@@ -59,17 +59,56 @@ extern const uint8_t _binary_BB0_key_end[]	asm("_binary_BB0_key_end");
 #define B_C2D_TOPIC			"devices/" B_DEVICE_ID "/messages/devicebound/#"
 #define B_DIRECT_METHOD_TOPIC	"$iothub/methods/POST/#"
 
-//static void B_MQTTHandler(void *handlerArgs, esp_event_base_t base, int32_t eventID, void *eventData)
-
 struct B_MQTTTaskParameter {
 	B_addressMap_t* addressMap;
 };
 
-// Not a task
-void B_MQTTStart(struct B_MQTTTaskParameter* taskParameter);
+// Intermediate function to relay a command received from MQTT to the appropriate task
+// Sanitizes the command
+// - Private function
+// static void B_MQTTRelayCommand(B_command_t* const command, uint8_t transmissionID)
 
-// Task
-// Function unused until transmition ID is implemented into the command struct
+// Handles incoming C2D messages
+// Called by B_RouteMQTTMessage
+// The data is in raw bytes as we need it
+// - Private function
+// static void B_HandleC2DMessage(esp_mqtt_client_handle_t client, int topicLen, char* topic, int dataLen, char* data)
+
+// Handles incoming Direct Method invocations
+// Called by B_RouteMQTTMessage
+// The data is a JSON array of bytes representing the command struct
+// - Private function
+// static void B_HandleDirectMethod(esp_mqtt_client_handle_t client, int topicLen, char* topic, int dataLen, char* data)
+
+// Serializes the command into a JSON array and sends it as a Direct Method response
+// The responseCommand's transmissionID field is used as the $rid in the topic
+// - Private function
+// static void B_SendDirectMethodResponse(B_command_t* const responseCommand)
+
+// Routes the incoming MQTT message to the appropriate handler based on the topic
+// Called by B_MQTTHandler
+// - Private function
+// static void B_RouteMQTTMessage(esp_mqtt_client_handle_t client, int topicLen, char* topic, int dataLen, char* data)
+
+// Test function to send a binary message to the broker
+// - Private function
+// static void B_SendMQTTBinary(esp_mqtt_client_handle_t client)
+
+// This function is called by the MQTT client event loop
+// It handles incoming MQTT events and dispatches them to the appropriate handlers
+// - handlerArgs user data registered to the event.
+// - base Event base for the handler (always MQTT Base in this example).
+// - eventID The id for the received event.
+// - eventData The data for the event, esp_mqtt_event_handle_t.
+// - Private function
+// static void B_MQTTHandler(void* handlerArgs, esp_event_base_t base, int32_t eventID, void* eventData)
+
+// Initialize the MQTT client and initiates connecting to the broker
+// - Private function
+// static void B_MQTTInit(B_addressMap_t* addressMap)
+
+// The MQTT task function
+// Expects the B_MQTTTaskParameter struct
 void B_MQTTTask(void* pvParameters);
 
 void B_MQTTCleanup();

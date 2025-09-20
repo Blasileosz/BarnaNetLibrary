@@ -20,12 +20,20 @@
 #include "B_SECRET.h"
 #include "B_BarnaNetCommand.h"
 
-// Time in miliseconds to wait for a task to reply
-#define B_TCP_REPLY_TIMEOUT 1000
-
-struct B_TcpTaskParameter {
+struct B_TCPIngressTaskParameter {
 	B_addressMap_t* addressMap;
 };
+
+// Private struct for passing parameters to the egress task
+struct B_TCPEgressTaskParameter {
+	B_addressMap_t* addressMap;
+	fd_set* socketSet;
+};
+
+// This task uses the transmissionID field of the command struct as the socket identifier
+// Thus it can be used as an index in the fd_set
+// Thankfully, the maximum number of sockets (FD_SETSIZE) is 64 on the ESP32
+static_assert(FD_SETSIZE <= 255);
 
 // Inits the TCP server
 // Returns the server socket, but returns 0 if fails
@@ -34,9 +42,10 @@ struct B_TcpTaskParameter {
 // static int B_InitTCPServer()
 
 // Dispatches the commands sent via TCP
+// Doesn't return error, instead fills the responseCommand with an error message and sends it to the egress task
 // - Private function
 // - !Runs in the TCP task
-// static void B_HandleTCPMessage(const B_command_t* const command, B_command_t* const responseCommand, B_addressMap_t* addressMap)
+// static void B_HandleTCPMessage(B_addressMap_t* const addressMap, B_command_t* const command, uint8_t transmissionID)
 
 // Send message to sock
 // Arguments: (int sock, const char *const sendBuffer, size_t bufferSize)
@@ -44,8 +53,15 @@ struct B_TcpTaskParameter {
 // - !Runs in the TCP task
 // static void B_TCPSendMessage(int sock, const char *const sendBuffer, size_t bufferSize)
 
+// Listens for replies to the TCP messages
+// - Blocking function
+// - Private function
+// - !Runs in the TCP Egress task
+// - Expected parameter: B_TCPEgressTaskParameter struct
+// static void B_TCPEgressTask(void* pvParameters)
+
 // Listens for TCP messages
 // - Blocking function
-// - !Runs in the TCP task
-// - Expected parameter: B_TcpTaskParameter struct
-void B_TCPTask(void* pvParameters);
+// - !Runs in the TCP Ingress task
+// - Expected parameter: B_TCPIngressTaskParameter struct
+void B_TCPIngressTask(void* pvParameters);

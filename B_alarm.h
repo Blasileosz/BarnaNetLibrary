@@ -62,7 +62,7 @@ static_assert(B_EVERYDAY == (B_MONDAY | B_TUESDAY | B_WEDNESDAY | B_THURSDAY | B
 #define B_ALARM_TRIGGER_SUNRISE 0xFFFFFFFF
 #define B_ALARM_TRIGGER_SUNSET (0xFFFFFFFF - 1)
 
-// TODO: Will inevitably be truncated when put into a commands data field
+// TODO: Will inevitably be truncated when put into a command's data field
 typedef struct {
 	B_timepart_t localTimepart; // Defined in local time, also stores if triggers at sunset or sunrise
 	uint8_t days; // The days of the week the  alarm should trigger

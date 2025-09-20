@@ -126,9 +126,12 @@ static void B_LoadAlarmsFromNVS()
 
 	// Read stored alarm container size
 	uint8_t containerSize = 0; // Alarm count
-	 err = nvs_get_u8(nvsHandle, B_ALARM_NVS_CONTAINER_SIZE, &containerSize);
-	if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND)
-		ESP_ERROR_CHECK(err);
+	err = nvs_get_u8(nvsHandle, B_ALARM_NVS_CONTAINER_SIZE, &containerSize);
+	if (err == ESP_ERR_NVS_NOT_FOUND) {
+		ESP_LOGI(alarmTag, "NVS alarm container size not yet initialized");
+		nvs_close(nvsHandle);
+		return;
+	} else ESP_ERROR_CHECK(err);
 
 	if (containerSize == 0) {
 		ESP_LOGI(alarmTag, "No alarms stored in NVS");
@@ -139,8 +142,11 @@ static void B_LoadAlarmsFromNVS()
 	// Read the stored buffer size in bytes
 	size_t requiredBufferSize = 0; // Size in bytes
 	err = nvs_get_blob(nvsHandle, B_ALARM_NVS_BUFFER, NULL, &requiredBufferSize);
-	if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND)
-		ESP_ERROR_CHECK(err);
+	if (requiredBufferSize == 0 || err == ESP_ERR_NVS_NOT_FOUND) {
+		ESP_LOGI(alarmTag, "NVS buffer not yet initialized");
+		nvs_close(nvsHandle);
+		return;
+	} else ESP_ERROR_CHECK(err);
 
 	// Check if the buffer size aligns with the B_AlarmInfo_t structure size
 	if (requiredBufferSize % sizeof(B_AlarmInfo_t) != 0) {
@@ -151,7 +157,7 @@ static void B_LoadAlarmsFromNVS()
 		return;
 	}
 
-	// Check if the capacity changed 
+	// Check if the capacity changed
 	if (CONFIG_B_ALARM_CONTAINER_CAPACITY < containerSize) {
 		ESP_LOGW(alarmTag, "Alarm container capacity config value lowered");
 		requiredBufferSize = CONFIG_B_ALARM_CONTAINER_CAPACITY * sizeof(B_AlarmInfo_t);
@@ -316,6 +322,11 @@ void B_AlarmTask(void* pvParameters)
 	}
 
 	QueueHandle_t alarmQueue = B_GetAddress(taskParameter->addressMap, B_TASKID_ALARM);
+	if (alarmQueue == B_ADDRESS_MAP_INVALID_QUEUE) {
+		ESP_LOGE(alarmTag, "The alarm queue is invalid, aborting startup");
+		vTaskDelete(NULL);
+	}
+
 	if (!B_TimerInit(alarmQueue)) {
 		ESP_LOGE(alarmTag, "Failed to create the alarm, aborting startup");
 		vTaskDelete(NULL);
@@ -331,17 +342,17 @@ void B_AlarmTask(void* pvParameters)
 
 		// Message from ISR, dispatch the triggered alarm's command to it's appropriate destination
 		if (commandOP == B_COMMAND_OP_RES && commandID == B_ALARM_COMMAND_TRIGGER) {
-			ESP_LOGI(alarmTag, "Triggered: #%i", selectedAlarmIndex);
+			ESP_LOGI(alarmTag, "Alarm triggered: #%i", selectedAlarmIndex);
 
 			if (selectedAlarmIndex == -1 || selectedAlarmIndex >= alarmContainer.size) {
 				ESP_LOGW(alarmTag, "Selected alarm index is invalid at time of trigger");
 				continue;
 			}
 
-			const B_command_t* triggerCommand = &alarmContainer.buffer[selectedAlarmIndex].triggerCommand;
-			QueueHandle_t destQueue = B_GetAddress(taskParameter->addressMap, triggerCommand->dest);
-			if (xQueueSend(destQueue, triggerCommand, 0) != pdPASS) {
-				ESP_LOGE(alarmTag, "Failed to dispatch trigger command");
+			B_command_t* const triggerCommand = { 0 };
+			memcpy(triggerCommand, &alarmContainer.buffer[selectedAlarmIndex].triggerCommand, sizeof(B_command_t)); // Copy because the alarm container may be modified while the command is being relayed
+			if (!B_RelayCommand(taskParameter->addressMap, triggerCommand, B_TASKID_ALARM, 0)) { // transmissionID is not used
+				ESP_LOGE(alarmTag, "Failed to relay trigger command");
 			}
 		}
 
@@ -359,18 +370,18 @@ void B_AlarmTask(void* pvParameters)
 			const B_command_t* triggerCommand = (B_command_t*)(command.body + 5);
 			if (B_COMMAND_OP(triggerCommand->header) != B_COMMAND_OP_SET || triggerCommand->dest == B_TASKID_ALARM || triggerCommand->dest == B_TASKID_TCP) {
 				ESP_LOGW(alarmTag, "Invalid trigger command received in new alarm");
-				B_SendStatusReply(taskParameter->addressMap, B_TASKID_ALARM, command.from, B_COMMAND_OP_ERR, commandID, "Invalid trigger command");
+				B_SendStatusReply(taskParameter->addressMap, &command, B_TASKID_ALARM, B_COMMAND_OP_ERR, "Invalid trigger command");
 				continue;
 			}
 
 			if (!B_InsertAlarm(&alarmContainer, localTimepart, days, triggerCommand, B_COMMAND_BODY_SIZE - 5)) {
 				ESP_LOGW(alarmTag, "Error while inserting");
-				B_SendStatusReply(taskParameter->addressMap, B_TASKID_ALARM, command.from, B_COMMAND_OP_ERR, commandID, "Falied to insert the alarm");
+				B_SendStatusReply(taskParameter->addressMap, &command, B_TASKID_ALARM, B_COMMAND_OP_ERR, "Failed to insert the alarm");
 				continue;
 			}
 
 			// Reply to the sender
-			B_SendStatusReply(taskParameter->addressMap, B_TASKID_ALARM, command.from, B_COMMAND_OP_RES, commandID, "Inserted alarm");
+			B_SendStatusReply(taskParameter->addressMap, &command, B_TASKID_ALARM, B_COMMAND_OP_RES, "Inserted alarm");
 		}
 
 		// Remove command
@@ -382,12 +393,12 @@ void B_AlarmTask(void* pvParameters)
 
 			if (!B_RemoveAlarm(&alarmContainer, removeIndex)) {
 				ESP_LOGW(alarmTag, "Error while removing");
-				B_SendStatusReply(taskParameter->addressMap, B_TASKID_ALARM, command.from, B_COMMAND_OP_ERR, commandID, "Falied to remove the alarm");
+				B_SendStatusReply(taskParameter->addressMap, &command, B_TASKID_ALARM, B_COMMAND_OP_ERR, "Failed to remove the alarm");
 				continue;
 			}
 
 			// Reply to the sender
-			B_SendStatusReply(taskParameter->addressMap, B_TASKID_ALARM, command.from, B_COMMAND_OP_RES, commandID, "Removed alarm");
+			B_SendStatusReply(taskParameter->addressMap, &command, B_TASKID_ALARM, B_COMMAND_OP_RES, "Removed alarm");
 		}
 
 		// List command
@@ -395,11 +406,7 @@ void B_AlarmTask(void* pvParameters)
 
 			ESP_LOGI(alarmTag, "List command");
 
-			B_command_t responseCommand = {
-				.from = B_TASKID_ALARM,
-				.dest = command.from,
-				.header = B_COMMAND_OP_RES | B_ALARM_COMMAND_LIST
-			};
+			B_command_t responseCommand = { 0 };
 
 			uint8_t maxFillableCount = alarmContainer.size;
 			// One alarm's data takes up 5 bytes, check if all of them fit into the body
@@ -410,6 +417,9 @@ void B_AlarmTask(void* pvParameters)
 
 			// Fill body
 			// No need to zero init the body, because the alarm container had
+			// TODO: I don't think it does
+			// TODO: I don't like this, what if the structure changes?
+			//       Maybe send multiple responses if it doesn't fit?
 			for (uint8_t i = 0; i < maxFillableCount; i++) {
 				B_AlarmInfo_t* iAlarmInfo = &alarmContainer.buffer[i];
 				B_FillCommandBody_DWORD(&responseCommand, i * 5, iAlarmInfo->localTimepart);
@@ -417,9 +427,8 @@ void B_AlarmTask(void* pvParameters)
 			}
 
 			// Send back response
-			QueueHandle_t responseQueue = B_GetAddress(taskParameter->addressMap, responseCommand.dest);
-			if (xQueueSend(responseQueue, &responseCommand, 0) != pdPASS) {
-				ESP_LOGE(alarmTag, "Failed to send data back to sender");
+			if (!B_SendReplyCommand(taskParameter->addressMap, &command, &responseCommand, B_TASKID_ALARM)) {
+				ESP_LOGE(alarmTag, "Failed to send LIST data back to sender");
 			}
 
 			// No need to recalculate next alarm
@@ -431,17 +440,13 @@ void B_AlarmTask(void* pvParameters)
 
 			ESP_LOGI(alarmTag, "Inspect command");
 
-			B_command_t responseCommand = {
-				.from = B_TASKID_ALARM,
-				.dest = command.from,
-				.header = B_COMMAND_OP_RES | B_ALARM_COMMAND_INSPECT
-			};
+			B_command_t responseCommand = { 0 };
 
 			uint8_t index = B_ReadCommandBody_BYTE(&command, 0);
 
 			if (alarmContainer.buffer == NULL || index >= alarmContainer.size) {
 				ESP_LOGW(alarmTag, "Invalid index");
-				B_SendStatusReply(taskParameter->addressMap, B_TASKID_ALARM, command.from, B_COMMAND_OP_ERR, commandID, "Invalid index");
+				B_SendStatusReply(taskParameter->addressMap, &command, B_TASKID_ALARM, B_COMMAND_OP_ERR, "Invalid index");
 				continue;
 			}
 
@@ -451,9 +456,8 @@ void B_AlarmTask(void* pvParameters)
 			memcpy(&responseCommand.body, triggerCommand, B_COMMAND_BODY_SIZE);
 
 			// Send back response
-			QueueHandle_t responseQueue = B_GetAddress(taskParameter->addressMap, responseCommand.dest);
-			if (xQueueSend(responseQueue, &responseCommand, 0) != pdPASS) {
-				ESP_LOGE(alarmTag, "Failed to send data back to sender");
+			if (!B_SendReplyCommand(taskParameter->addressMap, &command, &responseCommand, B_TASKID_ALARM)) {
+				ESP_LOGE(alarmTag, "Failed to send INSPECT data back to sender");
 			}
 
 			// No need to recalculate next alarm
@@ -462,13 +466,13 @@ void B_AlarmTask(void* pvParameters)
 
 		// Not valid command
 		else {
-			B_SendStatusReply(taskParameter->addressMap, B_TASKID_ALARM, command.from, B_COMMAND_OP_ERR, commandID, "Invalid command");
+			B_SendStatusReply(taskParameter->addressMap, &command, B_TASKID_ALARM, B_COMMAND_OP_ERR, "Invalid command");
 			continue;
 		}
 
 		// If there is a next alarm (the container isn't empty) restart the timer, otherwise stop the timer
 		B_timepart_t trigTime = B_FindNextAlarm(&selectedAlarmIndex);
-		if (selectedAlarmIndex != -1){
+		if (selectedAlarmIndex != -1) {
 			B_RestartTimer(trigTime);
 		}
 		else {
