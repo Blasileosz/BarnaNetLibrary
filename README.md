@@ -16,6 +16,8 @@
 	- The system cannot have multiple commands processing at the same time, since the whole server halts until the task replies
 	- The TCP server will need a new task for the queue (ingress and egress task?)
 - [ ] Test flashing from Github Codespace using port forwarding
+- [ ] Test [QEMU emulation](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-guides/tools/qemu.html)
+- [ ] Add OTA update functionality
 - [ ] Home Assistant integration
 - [x] Add two functions for sending commands, one for the comms tasks and one for responding to it
 - [x] Add a new flag for only responses to avoid comms tasks sending commands to each other
@@ -63,6 +65,29 @@
 	- `B_SendStatusReply`: sends a simple status reply string (RES or ERR)
 	- `B_SendReplyCommand`: after filling a command's body, this function populates the header and sends it to the destination task
 	- `B_RelayCommand`: used by comms tasks, relays a command to another task
+
+## API
+- The library contains helper classes and functions to build and parse commands
+	- The `Command` class represents a BarnaNet command structure
+		- It has helper functions to get and set the header fields and to get and set the body bytes
+		- It can convert itself to and from bytes
+
+	- The `Connection` class is a TCP client
+
+	- The `Service` class is a super-class for all services (tasks)
+		- Each service should implement static methods to build and parse commands
+		- The function naming convention is `Build_<OP>_<CommandName>` and `Parse_<OP>_<request OP>_<CommandName>` (Both GET and SET can have individual response and error parsers)
+		- The `Build_` functions should return a `Command` object
+		- The `Parse_RES_` or `Parse_ERR_` functions should return a string representation of the command
+
+- The alarm API is implemented in the [AlarmService](/api/AlarmService.py) file
+
+- Additionally, it includes a simple GUI explorer to test the API endpoints
+	- The explorer is built using the [Textual](https://textual.textualize.io/) library
+	- See usage example in the [api/test/libraryExplorer.py](api/test/libraryExplorer.py) file
+		- The app takes a list of classes as arguments, that inherit from the `Service` class. It will display the defined build commands in tabs to allow easy testing.
+		- If the the build functions have python style docstrings, the explorer GUI will display them
+		- It also takes an IP and a port to connect to the device. This way, the generated commands can be sent to the device and the responses are displayed in the GUI as well.
 
 ## TCP Server
 For definition, see [B_tcpServer.h](/B_tcpServer.h)

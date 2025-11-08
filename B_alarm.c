@@ -410,20 +410,24 @@ void B_AlarmTask(void* pvParameters)
 
 			uint8_t maxFillableCount = alarmContainer.size;
 			// One alarm's data takes up 5 bytes, check if all of them fit into the body
-			if (alarmContainer.size * 5 > B_COMMAND_BODY_SIZE) {
+			if (alarmContainer.size * 5 > B_COMMAND_BODY_SIZE - 1) {
 				ESP_LOGW(alarmTag, "List response cannot carry all the alarm's data");
 				maxFillableCount = B_COMMAND_BODY_SIZE / 5; // Integer division truncates
 			}
 
 			// Fill body
+			B_FillCommandBody_BYTE(&responseCommand, 0, maxFillableCount); // First byte is the count of alarms being sent back
+
 			// No need to zero init the body, because the alarm container had
 			// TODO: I don't think it does
 			// TODO: I don't like this, what if the structure changes?
 			//       Maybe send multiple responses if it doesn't fit?
+			int offset = 1;
 			for (uint8_t i = 0; i < maxFillableCount; i++) {
 				B_AlarmInfo_t* iAlarmInfo = &alarmContainer.buffer[i];
-				B_FillCommandBody_DWORD(&responseCommand, i * 5, iAlarmInfo->localTimepart);
-				B_FillCommandBody_BYTE(&responseCommand, i * 5 + 4, iAlarmInfo->days);
+				B_FillCommandBody_DWORD(&responseCommand, offset, iAlarmInfo->localTimepart);
+				B_FillCommandBody_BYTE(&responseCommand, offset + 4, iAlarmInfo->days);
+				offset += 5;
 			}
 
 			// Send back response
