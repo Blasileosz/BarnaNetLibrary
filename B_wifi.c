@@ -103,21 +103,19 @@ esp_err_t B_WifiInit()
 	return ESP_OK;
 }
 
-esp_err_t B_WifiConnect()
+esp_err_t B_WifiConnect(const char* ssid, const char* password)
 {
 	ESP_ERROR_CHECK(B_WifiInit());
 
 	wifi_config_t wifiConfig = {
 		.sta = {
-			.ssid = B_AP_SSID,
-			.password = B_AP_PASS,
-			.threshold.authmode = WIFI_AUTH_WPA2_PSK,
-			.pmf_cfg = {
-				.capable = true,
-				.required = false
-			}
+			.threshold.authmode = WIFI_AUTH_WPA2_PSK
 		}
 	};
+
+	// Copy SSID and password to wifi config
+	strncpy((char*)wifiConfig.sta.ssid, ssid, sizeof(wifiConfig.sta.ssid));
+	strncpy((char*)wifiConfig.sta.password, password, sizeof(wifiConfig.sta.password));
 	
 	// Set controller to station mode
 	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));

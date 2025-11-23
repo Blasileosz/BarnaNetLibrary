@@ -17,7 +17,6 @@
 #include <lwip/netdb.h>
 #include <lwip/dns.h>
 
-#include "B_SECRET.h"
 #include "B_BarnaNetCommand.h"
 
 struct B_TCPIngressTaskParameter {

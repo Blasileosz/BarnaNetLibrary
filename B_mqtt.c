@@ -265,7 +265,7 @@ static void B_MQTTHandler(void* handlerArgs, esp_event_base_t base, int32_t even
 
 // Initialize the MQTT client and initiates connecting to the broker
 // - Private function
-static void B_MQTTInit(B_addressMap_t* addressMap)
+static void B_MQTTInit(B_addressMap_t* addressMap, uint8_t* verificationCertificate, uint8_t* authenticationCertificate, uint8_t* authenticationKey)
 {
 	// It is easier to use the address map as a global variable than pass it into the event handler
 	addressMapPointer = addressMap;
@@ -279,7 +279,7 @@ static void B_MQTTInit(B_addressMap_t* addressMap)
 			.address.hostname = B_MQTT_HOST,
 			.address.port = B_MQTT_PORT,
 			.address.transport = MQTT_TRANSPORT_OVER_SSL,
-			.verification.certificate = (const char*)_binary_DigiCertGlobalRootG2_crt_pem_start,
+			.verification.certificate = (const char*)verificationCertificate,
 			//.verification.certificate = (const char*)_binary_BarnaNet_CA_crt_start,
 			//.verification.use_global_ca_store = false,
 			.verification.skip_cert_common_name_check = false // Do not verify the server certificate chain
@@ -288,8 +288,8 @@ static void B_MQTTInit(B_addressMap_t* addressMap)
 			.username = B_MQTT_USERNAME,
 			//.authentication.password = B_AZURE_SAS,
 			.client_id = B_DEVICE_ID,
-			.authentication.certificate = (const char*)_binary_BB0_crt_start,
-			.authentication.key = (const char*)_binary_BB0_key_start
+			.authentication.certificate = (const char*)authenticationCertificate,
+			.authentication.key = (const char*)authenticationKey
 		}
 	};
 	mqttClient = esp_mqtt_client_init(&mqttConfig);
@@ -306,12 +306,12 @@ static void B_MQTTInit(B_addressMap_t* addressMap)
 void B_MQTTTask(void* pvParameters)
 {
 	const struct B_MQTTTaskParameter* const taskParameter = (const struct B_MQTTTaskParameter* const)pvParameters;
-	if (taskParameter == NULL || taskParameter->addressMap == NULL) {
+	if (taskParameter == NULL || taskParameter->addressMap == NULL || taskParameter->verificationCertificate == NULL || taskParameter->authenticationCertificate == NULL || taskParameter->authenticationKey == NULL) {
 		ESP_LOGE(mqttTag, "The MQTT task parameter is invalid, aborting startup");
 		vTaskDelete(NULL);
 	}
 
-	B_MQTTInit(taskParameter->addressMap);
+	B_MQTTInit(taskParameter->addressMap, taskParameter->verificationCertificate, taskParameter->authenticationCertificate, taskParameter->authenticationKey);
 
 	// Get the MQTT queue
 	QueueHandle_t mqttQueue = B_GetAddress(taskParameter->addressMap, B_TASKID_MQTT);

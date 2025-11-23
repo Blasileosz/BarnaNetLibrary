@@ -17,8 +17,6 @@
 #include <lwip/netdb.h>
 #include <lwip/dns.h>
 
-#include "B_SECRET.h"
-
 #define B_WIFI_MAX_RETRY 20
 #define B_WIFI_OK 0b1
 #define B_WIFI_FAIL 0b10
@@ -34,7 +32,7 @@
 esp_err_t B_WifiInit();
 
 // Connect to the WIFI network using the credentials in B_SECRET.h
-esp_err_t B_WifiConnect();
+esp_err_t B_WifiConnect(const char* ssid, const char* password);
 
 void B_WifiDisconnect();
 void B_WifiCleanup();

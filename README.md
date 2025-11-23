@@ -135,7 +135,7 @@ For definition, see [B_alarm.h](/B_alarm.h)
 ## WIFI
 For definition, see [B_wifi.h](/B_wifi.h)
 - Simple station WIFI driver
-- WIFI credentials should be defined as `B_AP_SSID` and `B_AP_PASS` in the `B_SECRET.h` file (see [B_SECRET.txt](/B_SECRET.txt) for example)
+- Credentials could be stored in the sdkconfig as well, but this way they are not committed to the repository
 - To connect, call the `B_WifiConnect` function
 
 ## COLOR

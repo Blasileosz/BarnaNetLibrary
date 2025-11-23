@@ -1,5 +1,1 @@
-B_SECRET.h
-certs/*
-!certs/*.md
-
 **/__pycache__
