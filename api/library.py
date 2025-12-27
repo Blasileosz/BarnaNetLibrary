@@ -21,11 +21,12 @@ B_COMMAND_STRUCT_SIZE = 128
 class Command():
 	_data: bytearray
 
-	def __init__(self, data: bytes = None):
-		if data is None:
-			self._data = bytearray(B_COMMAND_STRUCT_SIZE)
-		elif len(data) == B_COMMAND_STRUCT_SIZE:
+	def __init__(self, data: bytes = bytes(B_COMMAND_STRUCT_SIZE)):
+		if len(data) == B_COMMAND_STRUCT_SIZE:
 			self._data = bytearray(data)
+		elif 0 < len(data) < B_COMMAND_STRUCT_SIZE:
+			self._data = bytearray(B_COMMAND_STRUCT_SIZE)
+			self._data[0:len(data)] = data
 		else:
 			raise ValueError("Data doesn't match the command size")
 
@@ -81,7 +82,7 @@ class Command():
 	
 	# Represent as hex string
 	def __repr__(self) -> str:
-		return str(self._data.hex())
+		return str(self._data.hex().upper())
 
 
 class Connection():
@@ -134,11 +135,15 @@ class Connection():
 # 	Parse_<OP>_<request OP>_<CommandName>
 class Service:
 
-	# If command doesn't have custom parsing, call this
+	# Fallback parsers
 	@staticmethod
 	def Parse_RES(command: Command) -> str:
-		return str(command.GetBodyBytes())
+		body = command.GetBodyBytes()
+		statusText = body.decode('utf-8', errors='ignore').strip('\x00')
+		return statusText
 
 	@staticmethod
 	def Parse_ERR(command: Command) -> str:
-		return str(command.GetBodyBytes())
+		body = command.GetBodyBytes()
+		statusText = body.decode('utf-8', errors='ignore').strip('\x00')
+		return statusText

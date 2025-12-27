@@ -6,7 +6,7 @@ menu "BarnaNetLibrary Menu"
 			default 2005
 			range 1 65535
 			help
-				The port number the TCP server binds to on all available interfaces
+				The port number the TCP server binds to on all available interfaces.
 	endmenu
 
 	menu "Alarm"
@@ -15,7 +15,16 @@ menu "BarnaNetLibrary Menu"
 			default 10
 			range 1 255
 			help
-				The maximum storable alarm count
+				The maximum storable alarm count.
+	endmenu
+
+	menu "Azure IoT Hub"
+		config B_MQTT_DEVICE_ID
+			string "MQTT Device ID"
+			default ""
+			help
+				The device ID used for MQTT connection.
+				Used as default device name in Device Admin component.
 	endmenu
 
 endmenu

@@ -9,22 +9,25 @@
 	- [ ] In all helper function, do check whether the pointer is NULL !!
 	- [ ] Check the command structure's lifetime against using them after their original scope is already over
 - [ ] Test TCP and MQTT connections against brute force attacks
-- [ ] Send the alarm count in the list alarms response
+- [x] Send the alarm count in the list alarms response
 - [x] Add transmission ID to the command structure
 	- TCP server would assign a transmission ID to each request and would map these IDs to client sockets
 	- Azure MQTT broker already gives an ID to the Direct Methods (when it is zero, the reply could immediately be discarded)
 	- The system cannot have multiple commands processing at the same time, since the whole server halts until the task replies
 	- The TCP server will need a new task for the queue (ingress and egress task?)
 - [ ] Test flashing from Github Codespace using port forwarding
+- [ ] Azure Device Twin
+	- [ ] Expose a function to the parent project to update the twin
+	- [ ] Best use would be to store the project name, so the web app wouldn't need to query it every time to display the different UI per project
 - [ ] Test [QEMU emulation](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-guides/tools/qemu.html)
 - [ ] Add OTA update functionality
 - [ ] Home Assistant integration
 - [x] Add two functions for sending commands, one for the comms tasks and one for responding to it
 - [x] Add a new flag for only responses to avoid comms tasks sending commands to each other
-- [ ] No need to create a home task for serving system time and such, just need to create a static function that is called in the comms tasks (maybe?)
 - [x] NVS: https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/storage/nvs_flash.html#application-example
 - [ ] mDNS or a custom discovery protocol to see other BarnaNet devices
 - [ ] Manual connect to WIFI using the device as an AP and a web interface
+- [ ] Performance: https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-guides/performance/speed.html
 
 ## Project structure
 - Some systems are implemented using FreeRTOS tasks
@@ -78,6 +81,7 @@
 		- Each service should implement static methods to build and parse commands
 		- The function naming convention is `Build_<OP>_<CommandName>` and `Parse_<OP>_<request OP>_<CommandName>` (Both GET and SET can have individual response and error parsers)
 		- The `Build_` functions should return a `Command` object
+			- These can throw error, as the explorer will catch them and display the error message
 		- The `Parse_RES_` or `Parse_ERR_` functions should return a string representation of the command
 
 - The alarm API is implemented in the [AlarmService](/api/AlarmService.py) file
@@ -153,10 +157,9 @@ For definition, see [B_colorUtil.h](/B_colorUtil.h)
 - For the task parameter, the given `B_MQTTTaskParameter` struct should be filled
 - MQTT Broker authentication
 	- SAS (Shared Access Signature) string
-		- This string needs to be generated using the Azure CLI: `az iot hub generate-sas-token --hub-name BarnaNet-IoTHubwork --device-id BB0 --duration 7200`
+		- This string needs to be generated using the Azure CLI: `az iot hub generate-sas-token --hub-name BarnaNet-IoTHubwork --device-id [B_MQTT_DEVICE_ID] --duration 7200`
 		- In order to be able to do this, DisableLocalAuth needs to be false, to enable local authentication
 		- To enable local auth: `az iot hub update --name <IoTHubName> --resource-group <ResourceGroupName> --set properties.disableLocalAuth=false`
-		- For the TLS session, the CA cert is also required: [DigiCert Global Root G2 root certificate](https://www.digicert.com/kb/digicert-root-certificates.htm#otherroots)
 	- X.509 certificate
 		- Each client requires a client certificate and a client key that it presents to the server. The server checks whether the presented cert any key was created from the root CA certificate.
 		- For this project the root CA certificate was self signed, otherwise the CA cert would have been purchased from a security firm like Entrust
@@ -164,15 +167,29 @@ For definition, see [B_colorUtil.h](/B_colorUtil.h)
 		- For simplicity, I used a program called [XCA](https://hohnstaedt.de/xca/)
 		- The CA certificate needs to be uploaded to the IoT Hub under the certificates tab
 			- Note that XCA exports the cert as a .crt file, while Azure is expecting a .pem file, the solution is to just change the extension
-			- The client certificate and key must have the same name as the device provisioned under the devices tab (BB0.crt and BB0.key)
-		- These files are read and included in the build using the CMake EMBED_TXTFILES function
+		- When adding the device to Azure, select "X.509 CA Signed" as the authentication type
+			- The client certificate and key must have the same name as the device provisioned under the devices tab
+		- Authenticating from device side:
+			- The files are read and embeded in the binary using the CMake EMBED_TXTFILES function or target_add_binary_data
+			- Which are then passed to the MQTT task using the parameter structure, the reading should be done in the project itself for transparency reasons
+			- However, there is a config option to specify the device ID in the sdkconfig (this component only uses that to name the device in the device admin task)
+	- For the TLS session, the CA cert is also required: [DigiCert Global Root G2 root certificate](https://www.digicert.com/kb/digicert-root-certificates.htm#otherroots)
 - IoT HUB MQTT messages
 	- `devices/{device_id}/messages/devicebound/#` topic receives messages Cloud to Device
 	- `devices/{device_id}/messages/events` topic sends messages Device to Cloud
 - Direct Methods
 	- https://learn.microsoft.com/en-us/azure/iot-hub/iot-hub-devguide-direct-methods#handle-a-direct-method-on-a-device
-- Device Twin
+- TODO: Device Twin
 	- [ ] https://learn.microsoft.com/en-us/azure/iot/iot-mqtt-connect-to-iot-hub#retrieve-device-twin-properties
 - To parse JSON data, use the [cJSON library](https://deepwiki.com/DaveGamble/cJSON) build into ESP-IDF
 	- Component register "json"
 	- Include cJSON.h
+
+## Device Admin
+For definition, see [B_deviceAdmin.h](/B_deviceAdmin.h)
+- Task function: `B_DeviceAdminTask`
+- For the task parameter, the given `B_DeviceAdminTaskParameter` struct should be filled
+- Allows getting device information and project information and setting device name
+	- Device name is stored in NVS
+	- The default device name is the MQTT device ID from the sdkconfig
+- To get device info or project info, please see the API

@@ -49,6 +49,36 @@
 - OP: GET
 	- Request layout: `[INDEX]`
 		- INDEX: The index of the alarm to be inspected
-	- Response layout: `[COMMAND * B_COMMAND_BODY_SIZE]`
+	- Response layout: `[COMMAND (through the entire body)]`
 		- COMMAND: The trigger command of the selected alarm
 			- Max length is determined by the command structure
+
+
+## Device Admin task
+- Task id = 4
+- Device name max length = 16 bytes
+
+### DEVICEINFO
+- ID: 0
+- OP: GET
+	- Request layout: `No data required`
+	- Response layout: `[DEVICE_NAME (16 bytes), CURRENT_TIME_STRING (32 bytes), FREE_HEAP (4 bytes)]`
+		- DEVICE_NAME: The name of the device as a string
+		- CURRENT_TIME_STRING: The current system time as a string in the format of "YYYY. MM. DD. - HH:MM:SS"
+		- FREE_HEAP: An unsigned 32bit value representing the free heap size in bytes
+
+### PROJECTINFO
+- ID: 1
+- OP: GET
+	- Request layout: `No data required`
+	- Response layout: `[IDF_VERSION (32 bytes), PROJECT_NAME (32 bytes), PROJECT_VERSION (32 bytes)]`
+		- IDF_VERSION: The version of the ESP-IDF framework used
+		- PROJECT_NAME: The name of the project
+		- PROJECT_VERSION: The version of the project, using git versioning
+
+### SETNAME
+- ID: 2
+- OP: SET
+	- Request layout: `[DEVICE_NAME (16 bytes)]`
+		- DEVICE_NAME: The new name for the device as a string (forcibly null-terminated)
+	- Response layout: A plaintext status

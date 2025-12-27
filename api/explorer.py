@@ -20,20 +20,21 @@ class APIExplorer(App):
 
 	BINDINGS = [
 		("q", "quit_app", "Quit App"),
+		("c", "connect_to_device", "Connect to Device"),
 	]
 
-	BNfunctionDict: dict = {}
+	buildFunctionRegistry: list = []
 	connection: library.Connection = None
 
 	# Collect information on the build functions from the provided services
 	def BuildFunctionDict(self, services: list[type]):
 		# Filter for Service sublclasses
 		validServices = filter(lambda service: issubclass(service, library.Service), services)
-		functionDict = {}
+		outFunctions = []
 
 		for service in validServices:
-			functions = inspect.getmembers(service, predicate=inspect.isfunction) # Get all function members, returns list of (name, callable)
-			buildFunctions = filter(lambda member: member[0].startswith("Build_"), functions)
+			allFunctions = inspect.getmembers(service, predicate=inspect.isfunction) # Get all function members, returns list of (name, callable)
+			buildFunctions = filter(lambda member: member[0].startswith("Build_"), allFunctions)
 
 			# Store function info in dict
 			for functionName, functionCallable in buildFunctions:
@@ -41,15 +42,16 @@ class APIExplorer(App):
 				# Convert it to tuple and get the parameter's annotation, because that contains the base type
 				functionArguments = [(name, param.annotation) for name, param in functionArguments]
 
-				functionDict[functionName] = {
+				outFunctions.append({
+					"functionName": functionName,
+					"functionCallable": functionCallable,
 					"serviceType": service,
 					"serviceName": service.__name__,
-					"callable": functionCallable,
 					"docstring": inspect.getdoc(functionCallable),
 					"arguments": functionArguments
-				}
+				})
 
-		return functionDict
+		return outFunctions
 
 	# Handle the result of self.connection.Connect
 	def ConnectionCallback(self, future: asyncio.Future):
@@ -70,7 +72,7 @@ class APIExplorer(App):
 		# Defer connection until the app is mounted (so it runs in the app's event loop)
 		self.connection = library.Connection(ip, port)
 
-		self.BNfunctionDict = self.BuildFunctionDict(BNservices)
+		self.buildFunctionRegistry = self.BuildFunctionDict(BNservices)
 		
 		super().__init__(**kwargs)  # Pass every other arg to parent
 
@@ -89,9 +91,11 @@ class APIExplorer(App):
 		with TabbedContent():
 	
 			# Create a tab for each build function (API endpoint)
-			for functionName, functionInfo in self.BNfunctionDict.items():
+			for functionInfo in self.buildFunctionRegistry:
 				functionService = functionInfo['serviceName']
+				functionName = functionInfo['functionName']
 				functionNameShort = functionName.removeprefix("Build_GET_").removeprefix("Build_SET_")
+
 				tabName = f"{functionService}:{functionNameShort}"
 
 				# IDs cannot have colons, though it would look much cleaner
@@ -133,13 +137,14 @@ class APIExplorer(App):
 					with Collapsible(title="Response", id=f"{uniqueTabID}_responseCollapsible"):
 						yield Static("Response will be shown here", id=f"{uniqueTabID}_responseBytes")
 						yield Rule()
-						yield Static("", id=f"{uniqueTabID}_response")
+						yield Static("", id=f"{uniqueTabID}_responseText")
 
 	# Call the appropriate command builder function with the gathered arguments
 	# Returns the built Command object or false on error
-	def CallCommandBuilder(self, functionName: str, functionService: str) -> library.Command:
-		functionInfo = self.BNfunctionDict.get(functionName, None)
-		if functionInfo is None or functionInfo["serviceName"] != functionService:
+	def CallCommandBuilder(self, functionName: str, serviceName: str) -> library.Command:
+		functionInfo = next(filter(lambda f: f["functionName"] == functionName and f["serviceName"] == serviceName, self.buildFunctionRegistry), None)
+
+		if functionInfo is None:
 			self.notify("Invalid function call", title="Parsing", severity="error")
 			return False
 
@@ -147,7 +152,7 @@ class APIExplorer(App):
 
 		# Gather arguments from inputs
 		for argName, argType in functionInfo["arguments"]:
-			inputID = f"{functionInfo['serviceName']}--{functionName}_arg_{argName}"
+			inputID = f"{serviceName}--{functionName}_arg_{argName}"
 			inputElement = self.query_one(f"#{inputID}")
 
 			if argType == int:
@@ -171,7 +176,7 @@ class APIExplorer(App):
 
 		# Call the builder function with the gathered arguments
 		try:
-			functionCallable = functionInfo["callable"]
+			functionCallable = functionInfo["functionCallable"]
 			command = functionCallable(**callArguments)
 		except Exception as e:
 			self.notify(f"Command builder failed with error: {e}", title="Parsing", severity="error")
@@ -182,20 +187,20 @@ class APIExplorer(App):
 	# Handle the result of the command transaction
 	def TransactionCallback(self, future: asyncio.Future):
 		try:
-			(responseBytes, functionName, functionService) = future.result()
+			(responseBytes, functionName, serviceName) = future.result()
 		except Exception as e:
 			self.notify(f"Transaction failed: {e}", severity="error", title="Transaction")
 			return
 
 		responseCommand = library.Command(responseBytes)
 
-		uniqueTabID = "--".join([functionService, functionName])
+		uniqueTabID = "--".join([serviceName, functionName])
 		collapsibleElement = self.query_one(f"#{uniqueTabID}_responseCollapsible")
 		responseBytesStatic = self.query_one(f"#{uniqueTabID}_responseBytes")
-		responseStatic = self.query_one(f"#{uniqueTabID}_response")
+		responseTextStatic = self.query_one(f"#{uniqueTabID}_responseText")
 
 		collapsibleElement.collapsed = False
-		responseBytesStatic.update(responseCommand.to_bytes().hex())
+		responseBytesStatic.update(repr(responseCommand))
 
 		# Validate response OP
 		if responseCommand.GetHeaderOP() != library.B_COMMAND_OP_RES and responseCommand.GetHeaderOP() != library.B_COMMAND_OP_ERR:
@@ -203,29 +208,31 @@ class APIExplorer(App):
 			return
 		
 		parserFunction = None
+		functionInfo = next(filter(lambda f: f["functionName"] == functionName and f["serviceName"] == serviceName, self.buildFunctionRegistry), None) # This will certainly exist
+		serviceType = functionInfo["serviceType"]
 
 		# Check for error or parser function (assume functionService is correct)
 		if responseCommand.GetHeaderOP() == library.B_COMMAND_OP_ERR:
 			parserFunctionName = functionName.replace("Build_", "Parse_ERR_")
-			parserFunction = getattr(functionService, parserFunctionName, None)
+			parserFunction = getattr(serviceType, parserFunctionName, None)
 
 			if parserFunction is None: # Fallback to generic parser
 				parserFunction = library.Service.Parse_ERR
 		
 		elif responseCommand.GetHeaderOP() == library.B_COMMAND_OP_RES:
 			parserFunctionName = functionName.replace("Build_", "Parse_RES_")
-			parserFunction = getattr(functionService, parserFunctionName, None)
+			parserFunction = getattr(serviceType, parserFunctionName, None)
 
 			if parserFunction is None: # Fallback to generic parser
 				parserFunction = library.Service.Parse_RES
 
 		parsedResponse = parserFunction(responseCommand)
-		responseStatic.update(f"Response:\n{str(parsedResponse)}")
+		responseTextStatic.update(f"Response:\n{str(parsedResponse)}")
 
-	# Separate thread function, because the callback needs the functionName and functionService for updating the UI
-	def CommandTransactionThread(self, command: library.Command, functionName: str, functionService: str):
+	# Separate thread function, because the callback needs the functionName and serviceName for updating the UI
+	def CommandTransactionThread(self, command: library.Command, functionName: str, serviceName: str):
 		responseBytes = self.connection.SendAndReceive(command)
-		return responseBytes, functionName, functionService
+		return responseBytes, functionName, serviceName
 
 	# Textual button press handler, called when any button is pressed
 	def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -234,21 +241,21 @@ class APIExplorer(App):
 
 		if buttonNameParts[0] == "SEND":
 			functionName = buttonNameParts[2]
-			functionService = buttonNameParts[1]
+			serviceName = buttonNameParts[1]
 
-			command = self.CallCommandBuilder(functionName, functionService)
+			command = self.CallCommandBuilder(functionName, serviceName)
 			if command is False:
 				return
 
 			# Send the command in a background thread to avoid blocking the event loop
-			transactionTask = asyncio.create_task(asyncio.to_thread(self.CommandTransactionThread, command, functionName, functionService))
+			transactionTask = asyncio.create_task(asyncio.to_thread(self.CommandTransactionThread, command, functionName, serviceName))
 			transactionTask.add_done_callback(self.TransactionCallback)
 
 		elif buttonNameParts[0] == "COPY":
 			functionName = buttonNameParts[2]
-			functionService = buttonNameParts[1]
+			serviceName = buttonNameParts[1]
 
-			command = self.CallCommandBuilder(functionName, functionService)
+			command = self.CallCommandBuilder(functionName, serviceName)
 			if command is False:
 				return
 			
@@ -257,10 +264,10 @@ class APIExplorer(App):
 
 		elif buttonNameParts[0] == "SHOW":
 			functionName = buttonNameParts[2]
-			functionService = buttonNameParts[1]
-			uniqueTabID = "--".join([functionService, functionName])
+			serviceName = buttonNameParts[1]
+			uniqueTabID = "--".join([serviceName, functionName])
 
-			command = self.CallCommandBuilder(functionName, functionService)
+			command = self.CallCommandBuilder(functionName, serviceName)
 			if command is False:
 				return
 
@@ -270,3 +277,7 @@ class APIExplorer(App):
 	# Exit when q is pressed (see BINDINGS)
 	def action_quit_app(self):
 		self.exit()
+
+	# Connect to device when c is pressed (see BINDINGS)
+	def action_connect_to_device(self):
+		self.ConnectToDevice()

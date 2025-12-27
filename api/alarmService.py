@@ -37,8 +37,8 @@ class AlarmService(Service):
 		# if not (0 <= hour <= 23) or not (0 <= minute <= 59) or not (0 <= second <= 59):
 		# 	raise ValueError("Invalid time specified")
 		
-		if not (0 <= days <= 0xFF):
-			raise ValueError("Days bitmask must be between 0 and 255")
+		if not (0 <= days <= 0b01111111):
+			raise ValueError("Days bitmask must be between 0 and 127")
 
 		command = Command()
 
@@ -55,7 +55,7 @@ class AlarmService(Service):
 	@staticmethod
 	def Build_SET_Remove(index: int) -> Command:
 		"""
-		Remove an existing alarm by index
+		Remove an existing alarm by index.
 		"""
 		if not (0 <= index <= 255):
 			raise ValueError("Index must be between 0 and 255")
@@ -83,12 +83,19 @@ class AlarmService(Service):
 		count = body[0]
 		parsedCommand = ""
 		offset = 1
-		for _ in range(count):
-			index = body[offset]
-			timepart = DeserializeDWORD(body[offset : offset + 5])
-			days = body[offset + 5]
+		for i in range(count):
+			timepart = DeserializeDWORD(body[offset : offset + 4])
+			days = body[offset + 4]
 
-			parsedCommand += f"Alarm #{index} triggers at: {AlarmService.ParseTimepart(timepart)} on {AlarmService.ParseDays(days)}\n"
+			parsedTimepart = ""
+			if timepart == AlarmService.B_ALARM_TRIGGER_SUNRISE:
+				parsedTimepart = "Sunrise"
+			elif timepart == AlarmService.B_ALARM_TRIGGER_SUNSET:
+				parsedTimepart = "Sunset"
+			else:
+				parsedTimepart = AlarmService.FormatTimepart(timepart)
+	
+			parsedCommand += f"Alarm #{i} triggers at: {parsedTimepart} on {AlarmService.ParseDays(days)}\n"
 
 			offset += 5
 		return parsedCommand
@@ -96,7 +103,7 @@ class AlarmService(Service):
 	@staticmethod
 	def Build_GET_Inspect(index: int) -> Command:
 		"""
-		Get detailed info about an alarm by index
+		Get the trigger command of an alarm by index.
 		"""
 		if not (0 <= index <= 255):
 			raise ValueError("Index must be between 0 and 255")
@@ -109,11 +116,10 @@ class AlarmService(Service):
 	
 	@staticmethod
 	def Parse_RES_GET_Inspect(command: Command) -> str:
-		body = command.GetBodyBytes()
-		triggerCommand = Command()
-		triggerCommand.SetBodyBytes(0, body)
+		body = command.GetBodyBytes() # The entire body is the trigger command
+		triggerCommand = Command(body)
 
-		return "\nTrigger Command (hex): " + repr(triggerCommand)
+		return f"Trigger Command:\nDEST: {triggerCommand.GetDest()}\nOP: {triggerCommand.GetHeaderOP()}\nID: {triggerCommand.GetHeaderID()}\nBody: {triggerCommand.GetBodyBytes().hex().upper()}"
 
 	@staticmethod
 	def GetLocalTimepart():
@@ -136,17 +142,17 @@ class AlarmService(Service):
 		minutes = (timepart % 3600) // 60
 		seconds = timepart % 60
 		return hours, minutes, seconds
+	
+	@staticmethod
+	def FormatTimepart(timepart: int) -> str:
+		hours, minutes, seconds = AlarmService.ParseTimepart(timepart)
+		return f"{hours:02}:{minutes:02}:{seconds:02}"
 
 	@staticmethod
-	def ParseDays(days: int) -> list:
-		if days == B_ALARM_TRIGGER_SUNRISE:
-			return ["Sunrise"]
-		elif days == B_ALARM_TRIGGER_SUNSET:
-			return ["Sunset"]
-
+	def ParseDays(days: int) -> str:
 		dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 		activeDays = []
 		for i in range(7):
 			if days & (1 << i):
 				activeDays.append(dayNames[i])
-		return activeDays
+		return ", ".join(activeDays)
