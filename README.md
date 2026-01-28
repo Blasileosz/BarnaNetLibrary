@@ -93,18 +93,11 @@
 		- If the the build functions have python style docstrings, the explorer GUI will display them
 		- It also takes an IP and a port to connect to the device. This way, the generated commands can be sent to the device and the responses are displayed in the GUI as well.
 
-## TCP Server
-For definition, see [B_tcpServer.h](/B_tcpServer.h)
-- Task function: `B_TCPIngressTask`
-- For the task parameter, the given `B_TCPIngressTaskParameter` struct should be filled
-- Receives and forwards commands to the appropriate task
-- Another task, `B_TCPEgressTask` is responsible for listening on the queue and sending the responses back to the clients
-- The task uses the socket id as the transmission ID for the command
-	- It can do it as long as the number of available sockets (FD_SETSIZE) is less than 256
-- The task should be run with at least 4096 words of stack depth (a word is the width of the stack portSTACK_TYPE)
-- The server can handle multiple clients in parallel thanks to the separation of ingress and egress tasks
-- The server binds to all interfaces on the port specified in the menuconfig
-- The server doesn't currently bind to IPv6 (clients are still supported through IPv6)
+## WIFI
+For definition, see [B_wifi.h](/B_wifi.h)
+- Simple station WIFI driver
+- Credentials could be stored in the sdkconfig as well, but this way they are not committed to the repository
+- To connect, call the `B_WifiConnect` function
 
 ## TIME
 For definition, see [B_time.h](/B_time.h)
@@ -118,6 +111,35 @@ For definition, see [B_time.h](/B_time.h)
 	- To ease the strain, two prebaked tables are also defined
 	- To get the data, I used the [NOAA calculator](https://gml.noaa.gov/grad/solcalc/), exported the [table](https://gml.noaa.gov/grad/solcalc/table.php?lat=47.896076&lon=20.380324&year=2025), removed DST in excel and parsed it
 	- Or use the [python script](/utils/bakeSun.py) to cook up the table
+
+## COLOR
+For definition, see [B_colorUtil.h](/B_colorUtil.h)
+- Defines an RGB structure and several color manipulation functions
+
+## WS2812
+For definition, see [B_WS2812.h](/B_WS2812.h)
+- [RMT LED example](https://github.com/espressif/esp-idf/tree/f404fe96b17692e3f1de536a3d73a180cdb53b42/examples/peripherals/rmt/led_strip/main)
+- [ESP-IDF RMT documentation](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/peripherals/rmt.html)
+- [WS2812B datasheet](https://cdn-shop.adafruit.com/datasheets/WS2812B.pdf)
+- [WS2812 datasheet](https://cdn-shop.adafruit.com/datasheets/WS2812.pdf)
+- Uses the RMT peripheral to generate the precise timing required by the WS2812B LEDs
+- The WS2812B LEDs expect color data in GRB format
+- The RMT channel is set up using the `B_WS2812_SetUpRMTChannel` function
+- The `B_WS2812_Transmit` function sends the color data to the LEDs
+- The RMT channel and encoders can be cleaned up using the `B_WS2812_CleanupRMT` function
+
+## TCP Server
+For definition, see [B_tcpServer.h](/B_tcpServer.h)
+- Task function: `B_TCPIngressTask`
+- For the task parameter, the given `B_TCPIngressTaskParameter` struct should be filled
+- Receives and forwards commands to the appropriate task
+- Another task, `B_TCPEgressTask` is responsible for listening on the queue and sending the responses back to the clients
+- The task uses the socket id as the transmission ID for the command
+	- It can do it as long as the number of available sockets (FD_SETSIZE) is less than 256
+- The task should be run with at least 4096 words of stack depth (a word is the width of the stack portSTACK_TYPE)
+- The server can handle multiple clients in parallel thanks to the separation of ingress and egress tasks
+- The server binds to all interfaces on the port specified in the menuconfig
+- The server doesn't currently bind to IPv6 (clients are still supported through IPv6)
 
 ## Alarm
 For definition, see [B_alarm.h](/B_alarm.h)
@@ -135,16 +157,6 @@ For definition, see [B_alarm.h](/B_alarm.h)
 	- The ISR then sends a command to the task to trigger the alarm's trigger-command
 	- The task then forwards the trigger-command to its destination
 - To add, remove, list or inspect alarms, please see the API
-
-## WIFI
-For definition, see [B_wifi.h](/B_wifi.h)
-- Simple station WIFI driver
-- Credentials could be stored in the sdkconfig as well, but this way they are not committed to the repository
-- To connect, call the `B_WifiConnect` function
-
-## COLOR
-For definition, see [B_colorUtil.h](/B_colorUtil.h)
-- Defines an RGB structure and several color manipulation functions
 
 ## MQTT
 - The backend is Azure IoT Hub

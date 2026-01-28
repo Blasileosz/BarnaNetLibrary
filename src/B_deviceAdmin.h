@@ -2,6 +2,8 @@
 
 // Miscellaneous System APIs: https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/misc_system_api.html
 
+// TODO: Add time since boot: esp_timer_get_time()
+
 #define B_TASKID_DEVICEADMIN 4
 
 #include <stdio.h>

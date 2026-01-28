@@ -83,6 +83,10 @@ class AlarmService(Service):
 		count = body[0]
 		parsedCommand = ""
 		offset = 1
+
+		if count == 0:
+			return "No alarms set."
+
 		for i in range(count):
 			timepart = DeserializeDWORD(body[offset : offset + 4])
 			days = body[offset + 4]
