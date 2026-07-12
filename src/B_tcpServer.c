@@ -274,8 +274,17 @@ void B_TCPIngressTask(void* pvParameters)
 				continue;
 			}
 			
+			// Use the socket as the transmission ID to identify the client in the egress task
+			uint8_t transmissionID = (uint8_t)nthSock;
+			if (nthSock > 255) {
+				// Socket fds start at ~56, but it is unlikey to have more than 200 concurrent connections
+				// Let's send it regardless, only the response will break
+				ESP_LOGE(tcpITag, "We did not expect socket fd > 255");
+				transmissionID = 0;
+			}
+
 			// Dispatch message handling
-			B_HandleTCPMessage(taskParameter->addressMap, (B_command_t* const)&receiveBuffer, nthSock);
+			B_HandleTCPMessage(taskParameter->addressMap, (B_command_t* const)&receiveBuffer, transmissionID);
 		}
 	}
 

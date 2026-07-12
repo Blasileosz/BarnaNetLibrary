@@ -281,6 +281,13 @@ static bool B_TimerInit(QueueHandle_t alarmCommandQueue)
 	return true;
 }
 
+// Stop the timer and reset its counter, used when there are no alarms in the container
+static void B_SuspendTimer()
+{
+	ESP_ERROR_CHECK(gptimer_stop(alarmTimer));
+	ESP_ERROR_CHECK(gptimer_set_raw_count(alarmTimer, 0));
+}
+
 static void B_RestartTimer(B_timepart_t seconds)
 {
 	uint64_t timerValue = 0;
@@ -288,18 +295,20 @@ static void B_RestartTimer(B_timepart_t seconds)
 	ESP_LOGI(alarmTag, "Counter value: %lld ticks", timerValue);
 	// Inaccuracy with 3s alarm: 3 000 480
 
-	// Must create new alarm if alarm_count changes
+	// Stop timer before restarting, otherwise it may trigger while being reconfigured
+	esp_err_t err = gptimer_stop(alarmTimer);
+	if (err != ESP_ERR_INVALID_STATE) // Invalid state is returned when the timer is already stopped, which is fine
+		ESP_ERROR_CHECK(err);
+
+	// Create and apply new alarm config
 	gptimer_alarm_config_t alarmConfig = {
 		.alarm_count = (uint64_t)seconds * B_ALARM_TIMER_RESOLUTION_HZ,
 		.flags.auto_reload_on_alarm = false
 	};
 	ESP_ERROR_CHECK(gptimer_set_alarm_action(alarmTimer, &alarmConfig));
 
-	// Start the timer if it hasn't been, otherwise just reset it
-	if (timerValue == 0)
-		ESP_ERROR_CHECK(gptimer_start(alarmTimer));
-	else
-		ESP_ERROR_CHECK(gptimer_set_raw_count(alarmTimer, 0));
+	ESP_ERROR_CHECK(gptimer_set_raw_count(alarmTimer, 0));
+	ESP_ERROR_CHECK(gptimer_start(alarmTimer));
 	
 	ESP_LOGI(alarmTag, "Restarted timer (%is)", seconds);
 }
@@ -350,7 +359,10 @@ void B_AlarmTask(void* pvParameters)
 			}
 
 			B_command_t triggerCommand = { 0 };
-			memcpy(&triggerCommand, &alarmContainer.buffer[selectedAlarmIndex].triggerCommand, sizeof(B_command_t)); // Copy because the alarm container may be modified while the command is being relayed
+			const B_command_t* selectedCommand = &alarmContainer.buffer[selectedAlarmIndex].triggerCommand;
+
+			// Copy the selected command because the alarm container may be modified while the command is being relayed
+			memcpy(&triggerCommand, selectedCommand, sizeof(B_command_t));
 			if (!B_RelayCommand(taskParameter->addressMap, &triggerCommand, B_TASKID_ALARM, 0)) { // transmissionID is not used
 				ESP_LOGE(alarmTag, "Failed to relay trigger command");
 			}
@@ -362,13 +374,14 @@ void B_AlarmTask(void* pvParameters)
 			B_timepart_t localTimepart = B_ReadCommandBody_DWORD(&command, 0);
 			uint8_t days = B_ReadCommandBody_BYTE(&command, 4);
 
-			ESP_LOGI(alarmTag, "Insert command: %us days:%u", localTimepart, days);
+			ESP_LOGI(alarmTag, "Insert command: %us days: %u", localTimepart, days);
 
-			// Insert command starts at body + 5
+			// Insert-command starts at body + 5
 			// Body section would overflow, so only access the header bytes!
-			// Sanitize new alarm's trigger command (only SET, definitely no TCP or ALARM as destination)
-			const B_command_t* triggerCommand = (B_command_t*)(command.body + 5);
-			if (B_COMMAND_OP(triggerCommand->header) != B_COMMAND_OP_SET || triggerCommand->dest == B_TASKID_ALARM || triggerCommand->dest == B_TASKID_TCP) {
+			// Sanitize new alarm's trigger command (only SET, no ALARM destination)
+			// (Since trigger uses B_RelayCommand, tasks with B_TASK_FLAG_ONLY_REPLY flag won't receive the relayed command)
+			const B_command_t* triggerCommand = (const B_command_t*)(command.body + 5);
+			if (B_COMMAND_OP(triggerCommand->header) != B_COMMAND_OP_SET || triggerCommand->dest == B_TASKID_ALARM) {
 				ESP_LOGW(alarmTag, "Invalid trigger command received in new alarm");
 				B_SendStatusReply(taskParameter->addressMap, &command, B_TASKID_ALARM, B_COMMAND_OP_ERR, "Invalid trigger command");
 				continue;
@@ -406,34 +419,35 @@ void B_AlarmTask(void* pvParameters)
 
 			ESP_LOGI(alarmTag, "List command");
 
-			B_command_t responseCommand = { 0 };
+			// Send packets until all alarms are sent.
+			uint8_t currentAlarmIndex = 0;
+			do {
+				B_command_t responseCommand = { 0 };
+				
+				// Fill first byte with the count of all the stored alarms, so the client knows how many alarms there are in total and can calculate how many packets to expect
+				B_FillCommandBody_BYTE(&responseCommand, 0, alarmContainer.size);
+				
+				int offset = 1; // Byte 0 is reserved for the count
+				while (currentAlarmIndex < alarmContainer.size) {
+					// Check if adding another alarm (5 bytes) exceeds the body size, if so, send the packet and start a new one
+					if (offset + 5 >= B_COMMAND_BODY_SIZE)
+						break;
 
-			uint8_t maxFillableCount = alarmContainer.size;
-			// One alarm's data takes up 5 bytes, check if all of them fit into the body
-			if (alarmContainer.size * 5 > B_COMMAND_BODY_SIZE - 1) {
-				ESP_LOGW(alarmTag, "List response cannot carry all the alarm's data");
-				maxFillableCount = B_COMMAND_BODY_SIZE / 5; // Integer division truncates
-			}
+					const B_AlarmInfo_t* iAlarmInfo = &alarmContainer.buffer[currentAlarmIndex];
+					B_FillCommandBody_DWORD(&responseCommand, offset, iAlarmInfo->localTimepart);
+					B_FillCommandBody_BYTE(&responseCommand, offset + 4, iAlarmInfo->days);
+					
+					offset += 5;
+					currentAlarmIndex++;
+				}
 
-			// Fill body
-			B_FillCommandBody_BYTE(&responseCommand, 0, maxFillableCount); // First byte is the count of alarms being sent back
+				// Send back response
+				if (!B_SendReplyCommand(taskParameter->addressMap, &command, &responseCommand, B_TASKID_ALARM)) {
+					ESP_LOGE(alarmTag, "Failed to send LIST data back to sender");
+					break; // Abort transmission on error
+				}
 
-			// No need to zero init the body, because the alarm container had
-			// TODO: I don't think it does
-			// TODO: I don't like this, what if the structure changes?
-			//       Maybe send multiple responses if it doesn't fit?
-			int offset = 1;
-			for (uint8_t i = 0; i < maxFillableCount; i++) {
-				B_AlarmInfo_t* iAlarmInfo = &alarmContainer.buffer[i];
-				B_FillCommandBody_DWORD(&responseCommand, offset, iAlarmInfo->localTimepart);
-				B_FillCommandBody_BYTE(&responseCommand, offset + 4, iAlarmInfo->days);
-				offset += 5;
-			}
-
-			// Send back response
-			if (!B_SendReplyCommand(taskParameter->addressMap, &command, &responseCommand, B_TASKID_ALARM)) {
-				ESP_LOGE(alarmTag, "Failed to send LIST data back to sender");
-			}
+			} while (currentAlarmIndex < alarmContainer.size);
 
 			// No need to recalculate next alarm
 			continue;
@@ -476,13 +490,10 @@ void B_AlarmTask(void* pvParameters)
 
 		// If there is a next alarm (the container isn't empty) restart the timer, otherwise stop the timer
 		B_timepart_t trigTime = B_FindNextAlarm(&selectedAlarmIndex);
-		if (selectedAlarmIndex != -1) {
+		if (selectedAlarmIndex != -1)
 			B_RestartTimer(trigTime);
-		}
-		else {
-			ESP_ERROR_CHECK(gptimer_stop(alarmTimer));
-			ESP_ERROR_CHECK(gptimer_set_raw_count(alarmTimer, 0));
-		}
+		else
+			B_SuspendTimer();
 	}
 
 	// Task paniced, clean up and delete task

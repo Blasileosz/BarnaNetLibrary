@@ -121,6 +121,10 @@ enum B_ALARM_COMMAND_IDS {
 // static bool B_TimerInit(QueueHandle_t alarmCommandQueue)
 // - Private function
 
+// static void B_SuspendTimer()
+// Stop the timer and reset its counter, used when there are no alarms in the container
+// - Private function
+
 // static void B_RestartTimer(B_timepart_t seconds)
 // - Private function
 

@@ -27,9 +27,9 @@ static void LoadDeviceNameFromNVS()
 	}
 	else ESP_ERROR_CHECK(err);
 
-	// Check if the stored size differs from the current max length
-	if (requiredSize != B_DEVICEADMIN_NAME_MAX_LENGTH) {
-		ESP_LOGW(deviceAdminTag, "Stored device name size differs current max length, erasing flash");
+	// Check if the stored size is larger than the current max length
+	if (requiredSize > B_DEVICEADMIN_NAME_MAX_LENGTH) {
+		ESP_LOGW(deviceAdminTag, "Stored device name size is larger than current max length, erasing flash");
 		nvs_flash_erase();
 		nvs_close(nvsHandle);
 		return;

@@ -29,6 +29,12 @@
 - [ ] Manual connect to WIFI using the device as an AP and a web interface
 - [ ] Performance: https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-guides/performance/speed.html
 
+## New Devices
+- When purchasing new devices, please note that few are going EOL
+- https://www.espressif.com/en/products/longevity-commitment
+- https://documentation.espressif.com/esp32_datasheet_en.pdf
+- DEV0: `ESP32-D0WDQ6-V3` is already EOL
+
 ## Project structure
 - Some systems are implemented using FreeRTOS tasks
 - Each task is implemented as an infinite loop running in parallel
@@ -141,9 +147,12 @@ For definition, see [B_tcpServer.h](/B_tcpServer.h)
 - The server binds to all interfaces on the port specified in the menuconfig
 - The server doesn't currently bind to IPv6 (clients are still supported through IPv6)
 
+![TCP command flow](./images/TCP_Flow_New.svg)
+
 ## Alarm
 For definition, see [B_alarm.h](/B_alarm.h)
 - [ESP-IDF timer and alarm documentation](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/peripherals/gptimer.html)
+- Uses the GPTimer driver instead of ESP Timer (High Resolution Timer) because such high precision is not required
 - Task function: `B_AlarmTask`
 - For the task parameter, the given `B_AlarmTaskParameter` struct should be filled
 - The alarm container has a finite capacity as specified in the menuconfig
@@ -189,13 +198,31 @@ For definition, see [B_alarm.h](/B_alarm.h)
 - IoT HUB MQTT messages
 	- `devices/{device_id}/messages/devicebound/#` topic receives messages Cloud to Device
 	- `devices/{device_id}/messages/events` topic sends messages Device to Cloud
+- Cloud to Device message (C2D)
+	- The Hub doesn't expect a response to a C2D message, but the system can still send a response to the MQTT task
+	- Every inbound commands TID is set to zero, so when the MQTT task receives the reponse command, it discards it
 - Direct Methods
-	- https://learn.microsoft.com/en-us/azure/iot-hub/iot-hub-devguide-direct-methods#handle-a-direct-method-on-a-device
-- TODO: Device Twin
-	- [ ] https://learn.microsoft.com/en-us/azure/iot/iot-mqtt-connect-to-iot-hub#retrieve-device-twin-properties
+	- [Docs](https://learn.microsoft.com/en-us/azure/iot-hub/iot-hub-devguide-direct-methods#handle-a-direct-method-on-a-device)
+	- The device receives the method name and the payload, and needs to reply
+	- The received command's TID is set to the incoming request id `$rid` to allow the system to match the response to the request
+- Device Twin
+	- [Docs using MQTT](https://learn.microsoft.com/en-us/azure/iot/iot-mqtt-connect-to-iot-hub#retrieve-device-twin-properties)
+	- [Twin properties](https://learn.microsoft.com/en-us/azure/iot-hub/iot-hub-devguide-device-twins)
+	- When sending or receiving twin data, the callback functions run on a separate task, so the operations are decoupled from the main MQTT message handling flow, allowing for more flexibility
+	- Flow
+		- When the device starts up, queries the Hub for the stored properties `SynchronizationCallback`. This data includes both desired and reported properties.
+		- Every time the desired properties are updated, the `DesiredStateCallback` is triggered with the new desired state
+		- Updating the reported state can be done in three ways:
+			- Sending a `B_MQTT_COMMAND_COMPILE_AND_SEND_REPORTED` command to the MQTT task, this will trigger the call of the `ReportedStateCallback` to get the latest reported state, and then send it to the broker
+			- Sending a `B_MQTT_COMMAND_SEND_REPORTED` command to the MQTT task with the new reported state in the body, this will skip triggering the `ReportedStateCallback` and directly send the given state to the broker
+			- Set an interval with the `B_MQTT_COMMAND_SET_REPORT_INTERVAL` command, this will trigger the `ReportedStateCallback` to be called at the given interval, and the returned state will be sent to the broker
+		- If you don't want to register a callback to any of the three events, you can set the callback to NULL in the task parameter structure
+		- The payload returned from the `ReportedStateCallback` function should be a heap allocated string, as the MQTT task will take care of freeing it after sending it to the broker
 - To parse JSON data, use the [cJSON library](https://deepwiki.com/DaveGamble/cJSON) build into ESP-IDF
 	- Component register "json"
 	- Include cJSON.h
+
+![MQTT message flow](./images/MQTT_Flow_New.svg)
 
 ## Device Admin
 For definition, see [B_deviceAdmin.h](/B_deviceAdmin.h)

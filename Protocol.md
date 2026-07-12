@@ -38,7 +38,7 @@
 ### LIST
 - ID: 3
 - OP: GET
-	- Request layout: `No data required`
+	- Request layout: No data required
 	- Response layout: `[ALARM_COUNT, TIMEPART0_0, TIMEPART1_0, TIMEPART2_0, TIMEPART3_0, DAYS_0, TIMEPART0_1, TIMEPART1_1, TIMEPART2_1, TIMEPART3_1, DAYS_1, ...]`
 		- TIMEPART: An unsigned 32bit value that stores the trigger time in seconds
 		- DAYS: An 8bit binary set that indicates which days the alarm should trigger
@@ -61,7 +61,7 @@
 ### DEVICEINFO
 - ID: 0
 - OP: GET
-	- Request layout: `No data required`
+	- Request layout: No data required
 	- Response layout: `[DEVICE_NAME (16 bytes), CURRENT_TIME_STRING (32 bytes), FREE_HEAP (4 bytes)]`
 		- DEVICE_NAME: The name of the device as a string
 		- CURRENT_TIME_STRING: The current system time as a string in the format of "YYYY. MM. DD. - HH:MM:SS"
@@ -70,7 +70,7 @@
 ### PROJECTINFO
 - ID: 1
 - OP: GET
-	- Request layout: `No data required`
+	- Request layout: No data required
 	- Response layout: `[IDF_VERSION (32 bytes), PROJECT_NAME (32 bytes), PROJECT_VERSION (32 bytes)]`
 		- IDF_VERSION: The version of the ESP-IDF framework used
 		- PROJECT_NAME: The name of the project
@@ -82,3 +82,33 @@
 	- Request layout: `[DEVICE_NAME (16 bytes)]`
 		- DEVICE_NAME: The new name for the device as a string (forcibly null-terminated)
 	- Response layout: A plaintext status
+
+
+## MQTT task Internal API
+- Task id = 3
+- The API treats any RES or ERR commands as responses to to commands arrived through MQTT
+	- Those with a TID > 0 are responses to DirectMethod calls, and the TID is used to set the $rid field in the response topic
+	- Those with a TID = 0 are responses to C2D calls
+
+### SEND_REPORTED
+- ID: 0
+- OP: SET
+- Will skip triggering the ReportedStateCallback and directly send the given state to the broker
+	- Request layout: A maximum B_COMMAND_BODY_SIZE long buffer containing the reported state JSON string
+	- Response layout: No response data
+
+### COMPILE_AND_SEND_REPORTED
+- ID: 1
+- OP: SET
+- Will trigger the call of the ReportedStateCallback to get the latest reported state, and then send it to the broker
+	- Request layout: No data required
+	- Response layout: No response data
+
+### SET_REPORT_INTERVAL
+- ID: 2
+- OP: SET
+	- Request layout: `[REPORT_INTERVAL (4 bytes)]`
+		- REPORT_INTERVAL: The new report interval in milliseconds
+			- Setting it to 0 will turn off periodic reporting
+			- The minimum allowed interval is 30 seconds, setting it below that will set it to 30 seconds
+	- Response layout: No response data

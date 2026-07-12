@@ -30,6 +30,12 @@ class Command():
 		else:
 			raise ValueError("Data doesn't match the command size")
 
+	def SetFrom(self, from_):
+		self._data[0] = from_
+
+	def GetFrom(self) -> int:
+		return self._data[0]
+
 	def SetDest(self, dest):
 		self._data[1] = dest
 
@@ -46,6 +52,12 @@ class Command():
 	
 	def GetHeaderID(self) -> int:
 		return self._data[2] & B_COMMAND_ID_MASK
+	
+	def SetTID(self, tid):
+		self._data[3] = tid
+
+	def GetTID(self) -> int:
+		return self._data[3]
 
 	def SetBodyByte(self, offset: int, value: int):
 		#if not (0 <= value <= 255):

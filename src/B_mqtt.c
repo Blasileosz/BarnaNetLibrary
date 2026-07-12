@@ -1,8 +1,108 @@
 #include "B_mqtt.h"
 
 static const char* mqttTag = "BarnaNet - MQTT";
+static const char* mqttTwinTag = "BarnaNet - MQTT Twin";
+static const char* mqttEventLoopTag = "BarnaNet - MQTT Event Loop";
+
+
 static B_addressMap_t* addressMapPointer = NULL; // If the MQTT handler was an ISR, this would not work (it would need to be passed into it)
 static esp_mqtt_client_handle_t mqttClient;
+
+static int requestIDCounter = 0; // Incrementing counter to generate unique request IDs
+
+static QueueHandle_t twinQueue = NULL;
+TickType_t twinReportInterval = portMAX_DELAY;
+static struct B_MQTTTwinTaskParameter twinTaskParameter = { 0 };
+
+static void B_MQTTTwinTask(void* pvParameters)
+{
+	const struct B_MQTTTwinTaskParameter* const taskParameter = (const struct B_MQTTTwinTaskParameter* const)pvParameters;
+	if (taskParameter == NULL || taskParameter->addressMap == NULL) {
+		ESP_LOGE(mqttTwinTag, "The MQTT Twin task parameter is invalid, aborting startup");
+		vTaskDelete(NULL);
+	}
+
+	while (true) {
+		
+		// Wait for event or timeout
+		B_twinEvent_t event;
+		if (xQueueReceive(twinQueue, &event, twinReportInterval) == pdTRUE) {
+
+			switch (event.type) {
+				case B_TWIN_EVENT_SYNCHRONIZATION:
+					ESP_LOGI(mqttTwinTag, "Twin Synchronization Event");
+
+					if (taskParameter->SynchronizationCallback != NULL) {
+						taskParameter->SynchronizationCallback(event.payload, event.payloadLen);
+					}
+
+					// We own this memory now, we must free it
+					free(event.payload);
+					break;
+
+				case B_TWIN_EVENT_PROCESS_DESIRED:
+					ESP_LOGI(mqttTwinTag, "Processing Desired Properties...");
+
+					if (taskParameter->DesiredStateCallback != NULL) {
+						taskParameter->DesiredStateCallback(event.payload, event.payloadLen);
+					}
+
+					// We own this memory now, we must free it
+					free(event.payload);
+					break;
+
+				case B_TWIN_EVENT_SEND_REPORTED:
+					ESP_LOGI(mqttTwinTag, "Manual Report Triggered");
+					B_twinEvent_t reportedEvent = { 0 };
+
+					// If the payload is set in the event, use it as the reported state to send, otherwise call the ReportedStateCallback to get the reported state to send
+					if (event.payload != NULL) {
+						reportedEvent.payload = event.payload;
+						reportedEvent.payloadLen = event.payloadLen;
+					}
+					else {
+						if (taskParameter->ReportedStateCallback == NULL)
+							break;
+
+						reportedEvent = taskParameter->ReportedStateCallback();
+						if (reportedEvent.payload == NULL)
+							break;
+					}
+
+					// Send the reported state to the broker
+					char reportTopic[64] = { 0 };
+					requestIDCounter++;
+					sprintf(reportTopic, B_MQTT_TWIN_PATCH_REPORTED_TOPIC, requestIDCounter);
+					
+					int publishMessageID = esp_mqtt_client_publish(mqttClient, reportTopic, reportedEvent.payload, reportedEvent.payloadLen, 0, 0);
+					ESP_LOGI(mqttTwinTag, "Sent reported state with message ID=%d", publishMessageID);
+
+					// We own this memory now, we must free it
+					free(reportedEvent.payload);
+					break;
+			}
+		}
+		else {
+			// Timeout occurred -> Time to send periodic report
+			ESP_LOGI(mqttTwinTag, "Periodic Report Triggered");
+			if (taskParameter->ReportedStateCallback == NULL)
+				continue;
+
+			B_twinEvent_t reportedEvent = taskParameter->ReportedStateCallback();
+			if (reportedEvent.payload == NULL)
+				continue;
+
+			char reportTopic[64] = { 0 };
+			requestIDCounter++;
+			sprintf(reportTopic, B_MQTT_TWIN_PATCH_REPORTED_TOPIC, requestIDCounter);
+			
+			int publishMessageID = esp_mqtt_client_publish(mqttClient, reportTopic, reportedEvent.payload, reportedEvent.payloadLen, 0, 0);
+			ESP_LOGI(mqttTwinTag, "Sent reported state with message ID=%d", publishMessageID);
+
+			free(reportedEvent.payload);
+		}
+	}
+}
 
 // Intermediate function to relay a command received from MQTT to the appropriate task
 // Sanitizes the command
@@ -11,13 +111,13 @@ static void B_MQTTRelayCommand(B_command_t* const command, uint8_t transmissionI
 {
 	// Sanitize request type
 	if (B_COMMAND_OP(command->header) == B_COMMAND_OP_RES || B_COMMAND_OP(command->header) == B_COMMAND_OP_ERR) {
-		ESP_LOGW(mqttTag, "Invalid request type");
+		ESP_LOGW(mqttEventLoopTag, "Invalid request type");
 		B_SendStatusReply(addressMapPointer, command, B_TASKID_MQTT, B_COMMAND_OP_ERR, "Invalid request type");
 		return;
 	}
 
 	if (!B_RelayCommand(addressMapPointer, command, B_TASKID_MQTT, transmissionID)) {
-		ESP_LOGE(mqttTag, "Failed to relay command");
+		ESP_LOGE(mqttEventLoopTag, "Failed to relay command");
 		B_SendStatusReply(addressMapPointer, command, B_TASKID_MQTT, B_COMMAND_OP_ERR, "INTERNAL: Relay error");
 		return;
 	}
@@ -29,17 +129,17 @@ static void B_MQTTRelayCommand(B_command_t* const command, uint8_t transmissionI
 // - Private function
 static void B_HandleC2DMessage(esp_mqtt_client_handle_t client, int topicLen, char* topic, int dataLen, char* data)
 {
-	ESP_LOGI(mqttTag, "Received C2D message");
+	ESP_LOGI(mqttEventLoopTag, "Received C2D message");
 
-	if (dataLen <= 0 || dataLen >= B_COMMAND_STRUCT_SIZE) {
-		ESP_LOGE(mqttTag, "Invalid data received");
+	if (dataLen <= 0 || dataLen > B_COMMAND_STRUCT_SIZE) {
+		ESP_LOGE(mqttEventLoopTag, "Invalid data received");
 		return;
 	}
 
 	// The data should be in raw bytes as we need it
 	B_command_t command = { 0 };
-	memcpy((void*)&command, data, sizeof(B_command_t));
-	ESP_LOGI(mqttTag, "Command from: %u, dest: %u, header: %u", command.from, command.dest, command.header);
+	memcpy((void*)&command, data, dataLen);
+	ESP_LOGI(mqttEventLoopTag, "Command from: %u, dest: %u, header: %u", command.from, command.dest, command.header);
 
 	B_MQTTRelayCommand(&command, 0); // 0 as transmissionID, will be ignored
 }
@@ -50,20 +150,20 @@ static void B_HandleC2DMessage(esp_mqtt_client_handle_t client, int topicLen, ch
 // - Private function
 static void B_HandleDirectMethod(esp_mqtt_client_handle_t client, int topicLen, char* topic, int dataLen, char* data)
 {
-	ESP_LOGI(mqttTag, "Handling Direct Method");
+	ESP_LOGI(mqttEventLoopTag, "Handling Direct Method");
 
 	// Find the query start in the URI
 	char* queryStart = strstr(topic, "?");
 	if (!queryStart) {
-		ESP_LOGE(mqttTag, "Query part not found");
+		ESP_LOGE(mqttEventLoopTag, "Query part not found");
 		return;
 	}
 	queryStart += 1; // Exclude the questionmark
 	int offset = queryStart - topic;
-	
+
 	char queryBuffer[512] = { 0 };
 	memcpy(queryBuffer, queryStart, topicLen - offset);
-	ESP_LOGI(mqttTag, "Query buffer: %s", queryBuffer);
+	ESP_LOGI(mqttEventLoopTag, "Query buffer: %s", queryBuffer);
 
 	// TODO: string length checks
 
@@ -72,17 +172,17 @@ static void B_HandleDirectMethod(esp_mqtt_client_handle_t client, int topicLen, 
 	ESP_ERROR_CHECK(httpd_query_key_value(queryBuffer, "$rid", ridBuffer, sizeof(ridBuffer) / sizeof(char)));
 
 	int rid = atoi(ridBuffer);
-	ESP_LOGI(mqttTag, "$rid=%s (%i)", ridBuffer, rid);
+	ESP_LOGI(mqttEventLoopTag, "$rid=%s (%i)", ridBuffer, rid);
 
 	// Use CJSON to deserialize the data, the JSON root should be an array
 	cJSON* root = cJSON_Parse(data);
 	if (!root) {
-		ESP_LOGE(mqttTag, "Failed to parse JSON");
+		ESP_LOGE(mqttEventLoopTag, "Failed to parse JSON");
 		return;
 	}
 
 	if (!cJSON_IsArray(root)) {
-		ESP_LOGE(mqttTag, "Expected array");
+		ESP_LOGE(mqttEventLoopTag, "Expected array");
 		cJSON_Delete(root);
 		return;
 	}
@@ -93,36 +193,39 @@ static void B_HandleDirectMethod(esp_mqtt_client_handle_t client, int topicLen, 
 	cJSON* element = NULL;
 	int elementIndex = 0;
 	cJSON_ArrayForEach(element, root) {
-		elementIndex++;
-
 		if (elementIndex >= B_COMMAND_STRUCT_SIZE) {
-			ESP_LOGE(mqttTag, "Array element index %d exceeds command body size", elementIndex);
+			ESP_LOGE(mqttEventLoopTag, "Array element index %d exceeds command body size", elementIndex);
 			break;
 		}
 
 		if (!cJSON_IsNumber(element)) {
-			ESP_LOGE(mqttTag, "Expected number");
+			ESP_LOGE(mqttEventLoopTag, "Expected number");
 			continue;
 		}
 
 		if (element->valueint < 0 || element->valueint > 255) {
-			ESP_LOGE(mqttTag, "Array element value %d out of range", element->valueint);
+			ESP_LOGE(mqttEventLoopTag, "Array element value %d out of range", element->valueint);
 			continue;
 		}
 
-		((uint8_t*)&command)[elementIndex - 1] = (uint8_t)element->valueint;
-		ESP_LOGI(mqttTag, "Array element: %d", element->valueint);
+		// TODO: This looks ugly
+		((uint8_t*)&command)[elementIndex] = (uint8_t)element->valueint;
+		elementIndex++;
 	}
 
 	cJSON_Delete(root);
-	ESP_LOGI(mqttTag, "Command from: %u, dest: %u, header: %u", command.from, command.dest, command.header);
+	ESP_LOGI(mqttEventLoopTag, "Command from: %u, dest: %u, header: %u", command.from, command.dest, command.header);
 
-	// Relay the command
+	// Save the request ID in the command's transmissionID field, so that the response can use it to set the $rid in the topic
+	uint8_t transmissionID = (uint8_t)rid;
 	if (rid > 255) {
-		ESP_LOGE(mqttTag, "We did not expect rid > 255");
+		// rid is never 0, but if it is above 255 that would be a problem
+		ESP_LOGE(mqttEventLoopTag, "We did not expect rid > 255");
+		transmissionID = 0;
 	}
 
-	B_MQTTRelayCommand(&command, rid % 256);
+	// Relay the command
+	B_MQTTRelayCommand(&command, transmissionID);
 }
 
 // Serializes the command into a JSON array and sends it as a Direct Method response
@@ -131,16 +234,16 @@ static void B_HandleDirectMethod(esp_mqtt_client_handle_t client, int topicLen, 
 static void B_SendDirectMethodResponse(B_command_t* const responseCommand)
 {
 	// Serialize replyCommand
-	cJSON *json_array = cJSON_CreateArray();
-	if (!json_array)
+	cJSON *jsonArray = cJSON_CreateArray();
+	if (!jsonArray)
 		return;
 
 	for (size_t i = 0; i < sizeof(B_command_t); ++i) {
-		cJSON_AddItemToArray(json_array, cJSON_CreateNumber(((uint8_t*)responseCommand)[i]));
+		cJSON_AddItemToArray(jsonArray, cJSON_CreateNumber(((uint8_t*)responseCommand)[i]));
 	}
 
-	char *json_str = cJSON_PrintUnformatted(json_array); // You may use cJSON_Print for pretty print
-	cJSON_Delete(json_array);
+	char *jsonStringified = cJSON_PrintUnformatted(jsonArray); // Use cJSON_Print for pretty print
+	cJSON_Delete(jsonArray);
 
 	// TODO: if the response code is error, send 500 instead of 200
 
@@ -148,21 +251,23 @@ static void B_SendDirectMethodResponse(B_command_t* const responseCommand)
 	char replyTopic[64] = { 0 };
 	strcpy(replyTopic, "$iothub/methods/res/200/?$rid=");
 
+	// Get the rid from the responseCommand's transmissionID field and append it to the topic
 	char ridBuffer[16] = { 0 };
 	itoa(responseCommand->transmissionID, ridBuffer, 10);
-	
+
+	// Check if the topic URI is long enough to hold the rid
 	if ((strlen(replyTopic) + strlen(ridBuffer) + 1) > sizeof(replyTopic)) {
 		ESP_LOGE(mqttTag, "MQTT reply topic URI longer than expected");
-		free(json_str);
+		free(jsonStringified);
 		return;
 	}
 
 	strcat(replyTopic, ridBuffer);
 
-	int msg_id = esp_mqtt_client_publish(mqttClient, replyTopic, json_str, strlen(json_str), 0, 0);
-	ESP_LOGI(mqttTag, "MQTT reply sent with msg_id=%d", msg_id);
+	int publishMessageID = esp_mqtt_client_publish(mqttClient, replyTopic, jsonStringified, strlen(jsonStringified), 0, 0);
+	ESP_LOGI(mqttTag, "MQTT reply sent with message ID=%d", publishMessageID);
 
-	free(json_str);
+	free(jsonStringified);
 }
 
 // Routes the incoming MQTT message to the appropriate handler based on the topic
@@ -173,12 +278,74 @@ static void B_RouteMQTTMessage(esp_mqtt_client_handle_t client, int topicLen, ch
 	// Route the topic to the appropriate handler (remove the # and the null terminator from the end)
 	if (strncmp(topic, B_MQTT_C2D_TOPIC, sizeof(B_MQTT_C2D_TOPIC) - 2) == 0) {
 		B_HandleC2DMessage(client, topicLen, topic, dataLen, data);
-
-	} else if (strncmp(topic, B_MQTT_DIRECT_METHOD_TOPIC, sizeof(B_MQTT_DIRECT_METHOD_TOPIC) - 2) == 0) {
+	}
+	else if (strncmp(topic, B_MQTT_DIRECT_METHOD_TOPIC, sizeof(B_MQTT_DIRECT_METHOD_TOPIC) - 2) == 0) {
 		B_HandleDirectMethod(client, topicLen, topic, dataLen, data);
+	}
+	else if (strncmp(topic, B_MQTT_TWIN_TOPIC, sizeof(B_MQTT_TWIN_TOPIC) - 2) == 0) {
 
-	} else {
-		ESP_LOGW(mqttTag, "Unhandled topic: %.*s", topicLen, topic);
+		// 200 is synchronization response, 204 is desired property update, other topics are ignored for now
+
+		// Check status code
+		if (strncmp(topic + sizeof(B_MQTT_TWIN_TOPIC) - 2, "429", 3) == 0) {
+			ESP_LOGE(mqttEventLoopTag, "Twin synchronization response received error, Too many requests (throttled)");
+			return;
+		}
+
+		if (strncmp(topic + sizeof(B_MQTT_TWIN_TOPIC) - 2, "5", 1) == 0) {
+			ESP_LOGE(mqttEventLoopTag, "Twin synchronization response received server error");
+			return;
+		}
+
+		// 204 responses have no payload, we can ignore them
+		if (dataLen == 0) {
+			return;
+		}
+
+		// Forward the twin message to the twin task via the queue
+		// TODO: Removes the request ID parameter. Could it be usefult downstream?
+		B_twinEvent_t event = { 0 };
+
+		// Ownership of the payload is transferred to the twin task, it must free it after processing
+		event.payload = malloc(dataLen);
+		if (event.payload == NULL) {
+			ESP_LOGE(mqttEventLoopTag, "Failed to allocate memory for twin event payload");
+			return;
+		}
+
+		memcpy(event.payload, data, dataLen);
+		event.payloadLen = dataLen;
+		event.type = B_TWIN_EVENT_SYNCHRONIZATION;
+		
+		if (xQueueSend(twinQueue, &event, pdMS_TO_TICKS(100)) != pdTRUE) {
+			ESP_LOGE(mqttEventLoopTag, "Failed to send twin event to queue");
+			free(event.payload);
+			return;
+		}
+	}
+	else if (strncmp(topic, B_MQTT_TWIN_RECEIVE_DESIRED_TOPIC, sizeof(B_MQTT_TWIN_RECEIVE_DESIRED_TOPIC) - 1) == 0) {
+		// This is a desired property update, forward it to the twin task via the queue
+		B_twinEvent_t event = { 0 };
+
+		// Ownership of the payload is transferred to the twin task, it must free it after processing
+		event.payload = malloc(dataLen);
+		if (event.payload == NULL) {
+			ESP_LOGE(mqttEventLoopTag, "Failed to allocate memory for twin event payload");
+			return;
+		}
+
+		memcpy(event.payload, data, dataLen);
+		event.payloadLen = dataLen;
+		event.type = B_TWIN_EVENT_PROCESS_DESIRED;
+		
+		if (xQueueSend(twinQueue, &event, pdMS_TO_TICKS(100)) != pdTRUE) {
+			ESP_LOGE(mqttEventLoopTag, "Failed to send twin event to queue");
+			free(event.payload);
+			return;
+		}
+	}
+	else {
+		ESP_LOGW(mqttEventLoopTag, "Unhandled topic: %.*s", topicLen, topic);
 	}
 }
 
@@ -187,8 +354,8 @@ static void B_RouteMQTTMessage(esp_mqtt_client_handle_t client, int topicLen, ch
 static void B_SendMQTTBinary(esp_mqtt_client_handle_t client)
 {
 	const char* response = "Hello back";
-	int msg_id = esp_mqtt_client_publish(client, "/topic/binary", response, 11, 0, 0);
-	ESP_LOGI(mqttTag, "binary sent with msg_id=%d", msg_id);
+	int publishMessageID = esp_mqtt_client_publish(client, "/topic/binary", response, 11, 0, 0);
+	ESP_LOGI(mqttTag, "binary sent with message ID=%d", publishMessageID);
 }
 
 // This function is called by the MQTT client event loop
@@ -198,43 +365,62 @@ static void B_SendMQTTBinary(esp_mqtt_client_handle_t client)
 // - eventID The id for the received event.
 // - eventData The data for the event, esp_mqtt_event_handle_t.
 // - Private function
+static int twinTopicSubscriptionMessageID = 0; // We need to track this to know when the twin topic subscription is acknowledged so we can trigger the initial synchronization
 static void B_MQTTHandler(void* handlerArgs, esp_event_base_t base, int32_t eventID, void* eventData)
 {
-	ESP_LOGD(mqttTag, "Event dispatched from event loop base=%s, eventID=%" PRIi32, base, eventID);
+	ESP_LOGD(mqttEventLoopTag, "Event dispatched from event loop base=%s, eventID=%" PRIi32, base, eventID);
 	esp_mqtt_event_handle_t event = eventData;
 	esp_mqtt_client_handle_t client = event->client;
 	int messageID = 0;
 
 	switch ((esp_mqtt_event_id_t)eventID) {
 		case MQTT_EVENT_CONNECTED:
-			ESP_LOGI(mqttTag, "MQTT_EVENT_CONNECTED");
+			ESP_LOGI(mqttEventLoopTag, "MQTT_EVENT_CONNECTED");
 
 			// Subscribe to topics
+			twinTopicSubscriptionMessageID = esp_mqtt_client_subscribe(client, B_MQTT_TWIN_TOPIC, 0);
+			ESP_LOGI(mqttTwinTag, "Sent subscribe request to %s, message ID=%d", B_MQTT_TWIN_TOPIC, twinTopicSubscriptionMessageID);
+
+			messageID = esp_mqtt_client_subscribe(client, B_MQTT_TWIN_PATCH_TOPIC, 0);
+			ESP_LOGI(mqttTwinTag, "Sent subscribe request to %s, message ID=%d", B_MQTT_TWIN_PATCH_TOPIC, messageID);
+			
 			messageID = esp_mqtt_client_subscribe(client, B_MQTT_C2D_TOPIC, 0);
-			ESP_LOGI(mqttTag, "Sent subscribe request to %s, messageID=%d", B_MQTT_C2D_TOPIC, messageID);
+			ESP_LOGI(mqttTwinTag, "Sent subscribe request to %s, message ID=%d", B_MQTT_C2D_TOPIC, messageID);
 
 			messageID = esp_mqtt_client_subscribe(client, B_MQTT_DIRECT_METHOD_TOPIC, 0);
-			ESP_LOGI(mqttTag, "Sent subscribe request to %s, messageID=%d", B_MQTT_DIRECT_METHOD_TOPIC, messageID);
+			ESP_LOGI(mqttEventLoopTag, "Sent subscribe request to %s, message ID=%d", B_MQTT_DIRECT_METHOD_TOPIC, messageID);
 			break;
 
 		case MQTT_EVENT_DISCONNECTED:
-			ESP_LOGI(mqttTag, "MQTT_EVENT_DISCONNECTED");
+			ESP_LOGI(mqttEventLoopTag, "MQTT_EVENT_DISCONNECTED");
 			break;
 
 		case MQTT_EVENT_SUBSCRIBED:
-			ESP_LOGI(mqttTag, "MQTT_EVENT_SUBSCRIBED, messageID=%d", event->msg_id);
+			ESP_LOGI(mqttEventLoopTag, "MQTT_EVENT_SUBSCRIBED, message ID=%d", event->msg_id);
+
+			// After subscribing, we can trigger the initial synchronization by sending a request to the special topic
+			// Check if this is the subscribe event for the twin topic
+			if (event->msg_id == twinTopicSubscriptionMessageID) {
+				char retrieveTopic[64] = { 0 };
+				requestIDCounter++;
+				sprintf(retrieveTopic, B_MQTT_TWIN_RETRIEVE_TOPIC, requestIDCounter);
+
+				int publishMessageID = esp_mqtt_client_publish(client, retrieveTopic, "", 0, 0, 0);
+				ESP_LOGI(mqttEventLoopTag, "Sent twin retrieve request with message ID=%d", publishMessageID);
+			}
+
 			break;
 
 		case MQTT_EVENT_UNSUBSCRIBED:
-			ESP_LOGI(mqttTag, "MQTT_EVENT_UNSUBSCRIBED, messageID=%d", event->msg_id);
+			ESP_LOGI(mqttEventLoopTag, "MQTT_EVENT_UNSUBSCRIBED, message ID=%d", event->msg_id);
 			break;
 
 		case MQTT_EVENT_PUBLISHED:
-			ESP_LOGI(mqttTag, "MQTT_EVENT_PUBLISHED, messageID=%d", event->msg_id);
+			ESP_LOGI(mqttEventLoopTag, "MQTT_EVENT_PUBLISHED, message ID=%d", event->msg_id);
 			break;
 
 		case MQTT_EVENT_DATA:
-			ESP_LOGI(mqttTag, "MQTT_EVENT_DATA");
+			ESP_LOGI(mqttEventLoopTag, "MQTT_EVENT_DATA");
 			printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
 			printf("DATA=%.*s\r\n", event->data_len, event->data);
 
@@ -242,37 +428,56 @@ static void B_MQTTHandler(void* handlerArgs, esp_event_base_t base, int32_t even
 			break;
 
 		case MQTT_EVENT_ERROR:
-			ESP_LOGI(mqttTag, "MQTT_EVENT_ERROR");
+			ESP_LOGI(mqttEventLoopTag, "MQTT_EVENT_ERROR");
 			if (event->error_handle->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT) {
-				ESP_LOGI(mqttTag, "Last error code reported from esp-tls: 0x%x", event->error_handle->esp_tls_last_esp_err);
-				ESP_LOGI(mqttTag, "Last tls stack error rid: 0x%x", event->error_handle->esp_tls_stack_err);
-				ESP_LOGI(mqttTag, "Last captured errno: %d (%s)", event->error_handle->esp_transport_sock_errno,
+				ESP_LOGI(mqttEventLoopTag, "Last error code reported from esp-tls: 0x%x", event->error_handle->esp_tls_last_esp_err);
+				ESP_LOGI(mqttEventLoopTag, "Last tls stack error rid: 0x%x", event->error_handle->esp_tls_stack_err);
+				ESP_LOGI(mqttEventLoopTag, "Last captured errno: %d (%s)", event->error_handle->esp_transport_sock_errno,
 					strerror(event->error_handle->esp_transport_sock_errno));
 			}
 			else if (event->error_handle->error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
-				ESP_LOGI(mqttTag, "Connection refused error: 0x%x", event->error_handle->connect_return_code);
+				ESP_LOGI(mqttEventLoopTag, "Connection refused error: 0x%x", event->error_handle->connect_return_code);
 			}
 			else {
-				ESP_LOGW(mqttTag, "Unknown error type: 0x%x", event->error_handle->error_type);
+				ESP_LOGW(mqttEventLoopTag, "Unknown error type: 0x%x", event->error_handle->error_type);
 			}
 			break;
 
 		default:
-			ESP_LOGI(mqttTag, "Other event id: %d", event->event_id);
+			ESP_LOGI(mqttEventLoopTag, "Other event id: %d", event->event_id);
 			break;
 	}
 }
 
 // Initialize the MQTT client and initiates connecting to the broker
 // - Private function
-static void B_MQTTInit(B_addressMap_t* addressMap, const char* verificationCertificate, const char* authenticationCertificate, const char* authenticationKey)
+static void B_MQTTInit(B_addressMap_t* addressMap, const char* verificationCertificate, const char* authenticationCertificate, const char* authenticationKey, size_t twinTaskStackSize, void (*SynchronizationCallback)(const char* json, size_t len), void (*DesiredStateCallback)(const char* json, size_t len), B_twinEvent_t (*ReportedStateCallback)())
 {
 	// It is easier to use the address map as a global variable than pass it into the event handler
 	addressMapPointer = addressMap;
+	
+	// Create the twin task and its queue
+	twinQueue = xQueueCreate(B_MQTT_TWIN_QUEUE_LENGTH, sizeof(B_twinEvent_t));
+	if (twinQueue == NULL) {
+		ESP_LOGE(mqttTag, "Failed to create MQTT Twin queue");
+		return;
+	}
 
-	// ESP_LOGI(mqttTag, "Azure CA cert: %s", verificationCertificate);
-	// ESP_LOGI(mqttTag, "Client cert: %s", authenticationCertificate);
-	// ESP_LOGI(mqttTag, "Client key: %s", authenticationKey);
+	if (twinTaskStackSize == 0){
+		ESP_LOGW(mqttTag, "Twin task stack size is incorrect, using default value of %d", B_MQTT_TWIN_TASK_DEFAULT_STACK_SIZE);
+		twinTaskStackSize = B_MQTT_TWIN_TASK_DEFAULT_STACK_SIZE;
+	}
+
+	twinTaskParameter.addressMap = addressMap;
+	twinTaskParameter.SynchronizationCallback = SynchronizationCallback;
+	twinTaskParameter.DesiredStateCallback = DesiredStateCallback;
+	twinTaskParameter.ReportedStateCallback = ReportedStateCallback;
+	xTaskCreate(B_MQTTTwinTask, "B_MQTTTwinTask", twinTaskStackSize, &twinTaskParameter, 3, NULL);
+
+	ESP_LOGI(mqttTag, "Initialized MQTT Twin Task");
+
+	
+	// Initialize MQTT client
 	const esp_mqtt_client_config_t mqttConfig = {
 		.broker = {
 			//.address.uri = B_MQTT_B_URL, // This line could replace the hostname, port and transport
@@ -298,7 +503,7 @@ static void B_MQTTInit(B_addressMap_t* addressMap, const char* verificationCerti
 	ESP_ERROR_CHECK(esp_mqtt_client_register_event(mqttClient, ESP_EVENT_ANY_ID, B_MQTTHandler, NULL));
 	ESP_ERROR_CHECK(esp_mqtt_client_start(mqttClient));
 
-	ESP_LOGI(mqttTag, "Initialized MQTT");
+	ESP_LOGI(mqttTag, "Initialized MQTT client");
 }
 
 // The MQTT task function
@@ -311,7 +516,16 @@ void B_MQTTTask(void* pvParameters)
 		vTaskDelete(NULL);
 	}
 
-	B_MQTTInit(taskParameter->addressMap, taskParameter->verificationCertificate, taskParameter->authenticationCertificate, taskParameter->authenticationKey);
+	B_MQTTInit(
+		taskParameter->addressMap,
+		taskParameter->verificationCertificate,
+		taskParameter->authenticationCertificate,
+		taskParameter->authenticationKey,
+		taskParameter->twinTaskStackSize,
+		taskParameter->SynchronizationCallback,
+		taskParameter->DesiredStateCallback,
+		taskParameter->ReportedStateCallback
+	);
 
 	// Get the MQTT queue
 	QueueHandle_t mqttQueue = B_GetAddress(taskParameter->addressMap, B_TASKID_MQTT);
@@ -320,7 +534,7 @@ void B_MQTTTask(void* pvParameters)
 		vTaskDelete(NULL);
 	}
 
-	while(true) {
+	while (true) {
 		// Wait for response commands from tasks
 		B_command_t responseCommand = { 0 };
 		if (xQueueReceive(mqttQueue, (void* const)&responseCommand, portMAX_DELAY) != pdTRUE) {
@@ -328,16 +542,76 @@ void B_MQTTTask(void* pvParameters)
 			continue;
 		}
 
+		uint8_t commandOP = B_COMMAND_OP(responseCommand.header);
+		uint8_t commandID = B_COMMAND_ID(responseCommand.header);
+
 		ESP_LOGI(mqttTag, "Received command from queue: from=%u, dest=%u, header=%u, transmissionID=%u", responseCommand.from, responseCommand.dest, responseCommand.header, responseCommand.transmissionID);
 
-		// C2D commands do not expect replies
-		if (responseCommand.transmissionID == 0) {
+		// Response to a C2D command
+		if ((commandOP == B_COMMAND_OP_RES || commandOP == B_COMMAND_OP_ERR) && responseCommand.transmissionID == 0) {
+			// C2D commands do not expect replies
 			ESP_LOGW(mqttTag, "C2D commands do not expect replies, discarding command");
-			continue;
 		}
 
-		// Send the Direct Method response back
-		B_SendDirectMethodResponse(&responseCommand);
+		// Response to a Direct Method
+		else if ((commandOP == B_COMMAND_OP_RES || commandOP == B_COMMAND_OP_ERR) && responseCommand.transmissionID != 0) {
+			B_SendDirectMethodResponse(&responseCommand);
+		}
+
+		// Read the reported state from the command body and send it to the broker
+		else if (commandOP == B_COMMAND_OP_SET && commandID == B_MQTT_COMMAND_SEND_REPORTED) {
+
+			int reportedStateSize = strnlen((char*)responseCommand.body, B_COMMAND_BODY_SIZE);
+			char* reportedStateBuffer = (char*)malloc(reportedStateSize);
+			if (reportedStateBuffer == NULL) {
+				ESP_LOGE(mqttTag, "Failed to allocate memory for reported state buffer");
+				continue;
+			}
+
+			memcpy((void*)reportedStateBuffer, responseCommand.body, reportedStateSize);
+
+			// Report command
+			B_twinEvent_t triggerReportedEvent = { 0 };
+			triggerReportedEvent.type = B_TWIN_EVENT_SEND_REPORTED;
+			triggerReportedEvent.payload = reportedStateBuffer;
+			triggerReportedEvent.payloadLen = reportedStateSize;
+			
+			if (xQueueSend(twinQueue, &triggerReportedEvent, pdMS_TO_TICKS(100)) != pdTRUE) {
+				ESP_LOGE(mqttTag, "Failed to send trigger reported event to queue");
+				continue;
+			}
+		}
+
+		// Send a trigger to the twin task to compile the reported state and send it to the broker
+		else if (commandOP == B_COMMAND_OP_SET && commandID == B_MQTT_COMMAND_COMPILE_AND_SEND_REPORTED) {
+			// Report command
+			B_twinEvent_t triggerReportedEvent = { 0 };
+			triggerReportedEvent.type = B_TWIN_EVENT_SEND_REPORTED;
+			
+			if (xQueueSend(twinQueue, &triggerReportedEvent, pdMS_TO_TICKS(100)) != pdTRUE) {
+				ESP_LOGE(mqttTag, "Failed to send trigger reported event to queue");
+				continue;
+			}
+		}
+
+		else if (commandOP == B_COMMAND_OP_SET && commandID == B_MQTT_COMMAND_SET_REPORT_INTERVAL) {
+			uint32_t newInterval = B_ReadCommandBody_DWORD(&responseCommand, 0);
+
+			if (newInterval == 0) {
+				twinReportInterval = portMAX_DELAY;
+				ESP_LOGI(mqttTag, "Turned off periodic reporting");
+			}
+			else if (newInterval < 30000) {
+				newInterval = 30000;
+				ESP_LOGW(mqttTag, "Report interval cannot be set below 30 seconds, setting it to 30 seconds");
+			}
+			
+			twinReportInterval = pdMS_TO_TICKS(newInterval);
+		}
+
+		else {
+			ESP_LOGW(mqttTag, "Invalid command received in MQTT task, discarding it");
+		}
 	}
 
 	// Task paniced, clean up and delete task
